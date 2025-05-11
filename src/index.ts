@@ -2,6 +2,7 @@ import type { Plugin } from "@elizaos/core";
 import {
   type Action,
   type Content,
+  EventType,
   type GenerateTextParams,
   type HandlerCallback,
   type IAgentRuntime,
@@ -16,7 +17,8 @@ import {
 } from "@elizaos/core";
 import { z } from "zod";
 import type { EmailObject } from "./types";
-
+import { analyzeEmailAction } from "./actions/analyzeEmailAction";
+import { handleEmailMessage } from "./handlers/messageHandler";
 /**
  * Defines the configuration schema for a plugin, including the validation rules for the plugin name.
  *
@@ -58,16 +60,20 @@ export const starterPlugin: Plugin = {
 
   async init(config: Record<string, string>, runtime: IAgentRuntime) {
     logger.info("*** Initializing plugin-pingpal-email ***");
-    await runtime.init();
+    // const emailService = runtime.getService(ServiceType.EMAIL);
+    // console.log("emailServiceAli", emailService);
+    // if (!emailService) {
+    //   throw new Error("Email service not found");
+    // }
     const emailService = runtime.getService(ServiceType.EMAIL);
     console.log("emailServiceAli", emailService);
-    if (!emailService) {
-      throw new Error("Email service not found");
-    }
+    const settings = await runtime.getSetting("EMAIL_INCOMING_USER");
+    console.log("settingsAli", settings);
+    runtime.registerEvent(EventType.MESSAGE_RECEIVED, handleEmailMessage);
   },
 
   services: [],
-  actions: [],
+  actions: [analyzeEmailAction],
   providers: [],
 };
 
