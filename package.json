@@ -30,7 +30,11 @@
   "dependencies": {
     "@elizaos/cli": "beta",
     "@elizaos/core": "beta",
+    "@elizaos/plugin-bootstrap": "^1.0.0-beta.49",
     "@elizaos/plugin-email": "^0.25.6-alpha.1",
+    "@elizaos/plugin-openai": "^1.0.0-beta.49",
+    "@elizaos/plugin-sql": "^1.0.0-beta.49",
+    "@elizaos/plugin-telegram": "^1.0.0-beta.49",
     "zod": "3.24.2"
   },
   "devDependencies": {
