@@ -30,6 +30,7 @@
   "dependencies": {
     "@elizaos/cli": "beta",
     "@elizaos/core": "beta",
+    "@elizaos/plugin-email": "^0.25.6-alpha.1",
     "zod": "3.24.2"
   },
   "devDependencies": {
