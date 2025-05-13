@@ -17,6 +17,7 @@ import { ImapFlow } from "imapflow";
 import type { EmailDetails } from "./types";
 import { analyzeEmailAction } from "./actions/analyzeEmailAction";
 import { sendTelegramNotificationAction } from "./actions/sendTelegramNotificationAction";
+import { convert as htmlToTextConverter } from "html-to-text";
 
 /**
  * Defines the configuration schema for a plugin, including the validation rules for the plugin name.
@@ -62,7 +63,7 @@ const pingPalEmailPlugin: Plugin = {
   evaluators: [],
   async init(config: Record<string, string>, runtime: IAgentRuntime) {
     logger.info("Initializing PingPal Email Plugin (with imapflow)...");
-    // Retrieve IMAP settings
+
     const host =
       runtime.getSetting("EMAIL_INCOMING_HOST") ||
       process.env.EMAIL_INCOMING_HOST;
@@ -78,30 +79,336 @@ const pingPalEmailPlugin: Plugin = {
     const pass =
       runtime.getSetting("EMAIL_INCOMING_PASS") ||
       process.env.EMAIL_INCOMING_PASS;
-    const secure = runtime.getSetting("EMAIL_INCOMING_SECURE") !== "false"; // Defaults to true
+    const secure =
+      (runtime.getSetting("EMAIL_INCOMING_SECURE") ||
+        process.env.EMAIL_INCOMING_SECURE) !== "false"; // Defaults to true
+    const mailbox =
+      runtime.getSetting("EMAIL_INCOMING_MAILBOX") ||
+      process.env.EMAIL_INCOMING_MAILBOX ||
+      "INBOX";
+
     if (!host || !user || !pass) {
       logger.error(
-        "Missing required IMAP settings. Please check EMAIL_INCOMING_HOST, EMAIL_INCOMING_USER, EMAIL_INCOMING_PASS."
+        "[PingPal Email] Missing required IMAP settings. Please check EMAIL_INCOMING_HOST, EMAIL_INCOMING_USER, EMAIL_INCOMING_PASS."
       );
       return;
     }
+
     const imapClient = new ImapFlow({
       host,
       port,
       secure,
       auth: { user, pass },
-      logger: false,
+      logger: false, // Set to true or custom logger for detailed IMAP logs
     });
-    try {
-      await imapClient.connect();
-      logger.info("[PingPal Email] Connected to IMAP server.");
-      await imapClient.logout();
+
+    imapClient.on("error", (err: Error) => {
+      logger.error("[PingPal Email] IMAP Flow Error:", err);
+      // Consider implementing reconnection logic here or in monitorEmails
+    });
+
+    const streamToString = async (
+      stream: NodeJS.ReadableStream
+    ): Promise<string> => {
+      const chunks: Buffer[] = [];
+      return new Promise((resolve, reject) => {
+        stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        stream.on("error", (err) => reject(err));
+        stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      });
+    };
+
+    const htmlToText = (html: string): string => {
+      return htmlToTextConverter(html, {
+        wordwrap: false, // Or your preferred wordwrap column, e.g., 130. false disables it.
+        selectors: [
+          { selector: "img", format: "skip" },
+          { selector: "hr", format: "skip" },
+        ],
+      });
+    };
+
+    const monitorEmails = async () => {
+      try {
+        if (!imapClient.usable) {
+          logger.info(
+            "[PingPal Email] Attempting to connect to IMAP server..."
+          );
+          await imapClient.connect();
+          logger.info("[PingPal Email] Connected to IMAP server.");
+        }
+
+        logger.info(`[PingPal Email] Opening mailbox: ${mailbox}...`);
+        await imapClient.mailboxOpen(mailbox);
+        logger.info(`[PingPal Email] Mailbox "${mailbox}" opened.`);
+
+        imapClient.on(
+          "exists",
+          async (data: {
+            count: number;
+            prevCount: number | null;
+            path: string;
+          }) => {
+            const previousCount = data.prevCount === null ? 0 : data.prevCount;
+            if (data.count > previousCount) {
+              logger.info(
+                `[PingPal Email] New email(s) detected. Current count: ${data.count}, Previous count: ${previousCount}`
+              );
+              const lock = await imapClient.getMailboxLock(mailbox);
+              try {
+                const uidsToFetch = await imapClient.search(
+                  { unseen: true },
+                  { uid: true }
+                );
+                logger.info(
+                  `[PingPal Email] Found ${uidsToFetch.length} unseen message(s).`
+                );
+
+                for (const uid of uidsToFetch) {
+                  logger.info(
+                    `[PingPal Email] Fetching message UID: ${uid}...`
+                  );
+                  const msgData = await imapClient.fetchOne(uid.toString(), {
+                    envelope: true,
+                    bodyStructure: true,
+                    headers: ["message-id", "date"],
+                  });
+
+                  let bodyText = "";
+                  let textPartInfo = msgData.bodyStructure?.childNodes?.find(
+                    (part) => part.type === "text/plain"
+                  );
+
+                  if (textPartInfo?.part) {
+                    const downloadedPart = await imapClient.download(
+                      uid.toString(),
+                      textPartInfo.part,
+                      { uid: true }
+                    );
+                    if (downloadedPart?.content) {
+                      bodyText = await streamToString(downloadedPart.content);
+                    }
+                  } else {
+                    let htmlPartInfo = msgData.bodyStructure?.childNodes?.find(
+                      (part) => part.type === "text/html"
+                    );
+                    if (htmlPartInfo?.part) {
+                      const downloadedHtmlPart = await imapClient.download(
+                        uid.toString(),
+                        htmlPartInfo.part,
+                        { uid: true }
+                      );
+                      if (downloadedHtmlPart?.content) {
+                        const htmlContent = await streamToString(
+                          downloadedHtmlPart.content
+                        );
+                        bodyText = htmlToText(htmlContent);
+                      }
+                    } else {
+                      const firstTextPart =
+                        msgData.bodyStructure?.childNodes?.find((part) =>
+                          part.type?.startsWith("text/")
+                        );
+                      if (firstTextPart?.part) {
+                        logger.warn(
+                          `[PingPal Email] No explicit text/plain or text/html part for UID ${uid}. Attempting first available text part: ${firstTextPart.type}`
+                        );
+                        const downloadedFallbackPart =
+                          await imapClient.download(
+                            uid.toString(),
+                            firstTextPart.part,
+                            { uid: true }
+                          );
+                        if (downloadedFallbackPart?.content) {
+                          bodyText = await streamToString(
+                            downloadedFallbackPart.content
+                          );
+                        }
+                      } else {
+                        logger.warn(
+                          `[PingPal Email] No text/plain or text/html part found for UID ${uid}. Body will be empty.`
+                        );
+                      }
+                    }
+                  }
+
+                  let extractedMessageIdValue: string | string[] | undefined;
+                  if (msgData.headers) {
+                    if (msgData.headers instanceof Map) {
+                      extractedMessageIdValue =
+                        msgData.headers.get("message-id");
+                    } else if (
+                      typeof msgData.headers === "object" &&
+                      msgData.headers !== null
+                    ) {
+                      const headersObj = msgData.headers as any;
+                      extractedMessageIdValue =
+                        headersObj["message-id"] ||
+                        headersObj["Message-ID"] ||
+                        headersObj["Message-Id"];
+                      if (extractedMessageIdValue === undefined) {
+                        logger.warn(
+                          `[PingPal Email] 'message-id' not found in headers object for UID ${uid}. Headers:`,
+                          Object.keys(headersObj)
+                        );
+                      }
+                    } else {
+                      logger.warn(
+                        `[PingPal Email] msgData.headers is not a Map or a recognized object for UID ${uid}. Type: ${typeof msgData.headers}`
+                      );
+                    }
+                  }
+
+                  let messageId = "";
+                  if (Array.isArray(extractedMessageIdValue)) {
+                    messageId = extractedMessageIdValue[0] || "";
+                  } else if (typeof extractedMessageIdValue === "string") {
+                    messageId = extractedMessageIdValue;
+                  }
+
+                  if (!messageId) {
+                    logger.warn(
+                      `[PingPal Email] Could not extract Message-ID for UID ${uid}. Generating a fallback.`
+                    );
+                    messageId = `pingpal-no-id-${uid}-${msgData.envelope.date?.toISOString() || Date.now()}`;
+                  }
+
+                  const emailDetails: EmailDetails = {
+                    messageId: messageId.trim(),
+                    from:
+                      msgData.envelope.from?.[0]?.mailbox &&
+                      msgData.envelope.from?.[0]?.host
+                        ? `${msgData.envelope.from[0].mailbox}@${msgData.envelope.from[0].host}`
+                        : msgData.envelope.from?.[0]?.name || "Unknown Sender",
+                    to:
+                      msgData.envelope.to?.map((addr) =>
+                        addr.mailbox && addr.host
+                          ? `${addr.mailbox}@${addr.host}`
+                          : addr.name || "Unknown Recipient"
+                      ) || [],
+                    subject: msgData.envelope.subject || "No Subject",
+                    bodyText: bodyText,
+                  };
+
+                  logger.info(
+                    `[PingPal Email] Processing email: Subject - "${emailDetails.subject}", From - "${emailDetails.from}", Message-ID - "${emailDetails.messageId}"`
+                  );
+                  const analyzeAction = runtime.actions.find(
+                    (a) => a.name === "ANALYZE_EMAIL"
+                  );
+                  if (analyzeAction?.handler) {
+                    try {
+                      await analyzeAction.handler(
+                        runtime,
+                        emailDetails as any,
+                        undefined,
+                        undefined
+                      );
+                    } catch (actionError) {
+                      logger.error(
+                        `[PingPal Email] Error executing ANALYZE_EMAIL action for UID ${uid}:`,
+                        actionError
+                      );
+                    }
+                  } else {
+                    logger.error(
+                      "[PingPal Email] ANALYZE_EMAIL action not found."
+                    );
+                  }
+                }
+              } catch (fetchErr) {
+                logger.error(
+                  "[PingPal Email] Error fetching or processing messages:",
+                  fetchErr
+                );
+              } finally {
+                lock.release();
+              }
+            }
+          }
+        );
+
+        logger.info("[PingPal Email] Starting IDLE mode...");
+        try {
+          await imapClient.idle();
+          logger.info("[PingPal Email] IDLE mode stopped gracefully.");
+        } catch (idleErr) {
+          logger.error(
+            "[PingPal Email] IDLE mode error or connection lost:",
+            idleErr
+          );
+          if (imapClient.usable === false) {
+            logger.info(
+              "[PingPal Email] Connection lost during IDLE. Attempting to reconnect in 30 seconds..."
+            );
+            setTimeout(monitorEmails, 30000);
+          } else {
+            logger.info(
+              "[PingPal Email] IDLE ended, but client still usable. Will attempt to restart IDLE in 10 seconds."
+            );
+            setTimeout(async () => {
+              try {
+                if (imapClient.usable) {
+                  await imapClient.idle();
+                }
+              } catch (reIdleErr) {
+                logger.error(
+                  "[PingPal Email] Failed to restart IDLE:",
+                  reIdleErr
+                );
+                setTimeout(monitorEmails, 30000);
+              }
+            }, 10000);
+          }
+        }
+      } catch (err) {
+        logger.error("[PingPal Email] Main monitoring function error:", err);
+        logger.info("[PingPal Email] Attempting to reconnect in 60 seconds...");
+        if (imapClient.usable) {
+          try {
+            await imapClient.logout();
+          } catch (logoutErr) {
+            logger.error(
+              "[PingPal Email] Error during logout after main error:",
+              logoutErr
+            );
+            imapClient.close();
+          }
+        } else {
+          imapClient.close();
+        }
+        setTimeout(monitorEmails, 60000);
+      }
+    };
+
+    monitorEmails();
+
+    const gracefulShutdown = async () => {
       logger.info(
-        "[PingPal Email] Logged out from IMAP server (test complete)."
+        "[PingPal Email] Attempting graceful shutdown of IMAP client..."
       );
-    } catch (err) {
-      logger.error("[PingPal Email] IMAP Connection failed:", err);
-    }
+      if (imapClient && imapClient.usable) {
+        try {
+          await imapClient.logout();
+          logger.info("[PingPal Email] IMAP client logged out successfully.");
+        } catch (err) {
+          logger.error("[PingPal Email] Error during IMAP logout:", err);
+          imapClient.close();
+        }
+      } else if (imapClient) {
+        imapClient.close();
+        logger.info(
+          "[PingPal Email] IMAP client closed (was not in a usable state)."
+        );
+      }
+    };
+
+    process.on("SIGINT", gracefulShutdown);
+    process.on("SIGTERM", gracefulShutdown);
+
+    logger.info(
+      "PingPal Email Plugin (with imapflow) initialized and monitoring started."
+    );
   },
 };
 
