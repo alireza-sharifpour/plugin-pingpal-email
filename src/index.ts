@@ -15,6 +15,8 @@ import {
 import { z } from "zod";
 import { ImapFlow } from "imapflow";
 import type { EmailDetails } from "./types";
+import { analyzeEmailAction } from "./actions/analyzeEmailAction";
+import { sendTelegramNotificationAction } from "./actions/sendTelegramNotificationAction";
 
 /**
  * Defines the configuration schema for a plugin, including the validation rules for the plugin name.
@@ -55,7 +57,7 @@ const pingPalEmailPlugin: Plugin = {
   name: "plugin-pingpal-email",
   description:
     "Monitors an email account using imapflow for important emails and notifies via Telegram.",
-  actions: [], // Will be filled in later
+  actions: [analyzeEmailAction, sendTelegramNotificationAction],
   providers: [],
   evaluators: [],
   async init(config: Record<string, string>, runtime: IAgentRuntime) {
