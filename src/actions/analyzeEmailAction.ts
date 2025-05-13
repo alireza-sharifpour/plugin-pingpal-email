@@ -110,8 +110,8 @@ Respond ONLY with a JSON object matching this schema:
       type: "object",
       properties: {
         important: { type: "boolean" },
-        summary: { type: "string" },
-        reason_for_importance: { type: "string" },
+        summary: { type: ["string", "null"] }, // Allow string or null
+        reason_for_importance: { type: ["string", "null"] }, // Allow string or null
       },
       required: ["important", "summary", "reason_for_importance"],
     };
@@ -132,11 +132,13 @@ Respond ONLY with a JSON object matching this schema:
         // analysisResult remains undefined, will use a fallback for logging
       } else {
         // Validate the structure and types of the parsed LLM response
-        // This basic validation can be enhanced if needed, but OBJECT_SMALL with schema helps.
+        // OBJECT_SMALL with schema should handle most of this, but an additional check is fine.
         if (
           typeof parsedResponse.important !== "boolean" ||
-          typeof parsedResponse.summary !== "string" ||
-          typeof parsedResponse.reason_for_importance !== "string"
+          (typeof parsedResponse.summary !== "string" &&
+            parsedResponse.summary !== null) || // Allow null
+          (typeof parsedResponse.reason_for_importance !== "string" &&
+            parsedResponse.reason_for_importance !== null) // Allow null
         ) {
           logger.error(
             `[ANALYZE_EMAIL] LLM response validation failed for email ID ${emailDetails.messageId}: Invalid structure or types after schema validation. Received:`,
@@ -147,8 +149,12 @@ Respond ONLY with a JSON object matching this schema:
         } else {
           analysisResult = {
             important: parsedResponse.important,
-            summary: parsedResponse.summary,
-            reason_for_importance: parsedResponse.reason_for_importance,
+            summary:
+              parsedResponse.summary === null ? "" : parsedResponse.summary,
+            reason_for_importance:
+              parsedResponse.reason_for_importance === null
+                ? ""
+                : parsedResponse.reason_for_importance,
           };
         }
       }
