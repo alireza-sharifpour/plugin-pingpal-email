@@ -106,29 +106,40 @@ Respond ONLY with a JSON object matching this schema:
   "reason_for_importance": "string" // Brief reason why it's important, or empty/null if not.
 }`;
 
-    try {
-      const llmResponseString = await runtime.useModel(ModelType.TEXT_SMALL, {
-        prompt: llmPrompt,
-        strictObject: true,
-      });
+    const outputSchema = {
+      type: "object",
+      properties: {
+        important: { type: "boolean" },
+        summary: { type: "string" },
+        reason_for_importance: { type: "string" },
+      },
+      required: ["important", "summary", "reason_for_importance"],
+    };
 
-      if (!llmResponseString) {
+    try {
+      // Update to use ModelType.OBJECT_SMALL and the defined schema
+      const parsedResponse = (await runtime.useModel(ModelType.OBJECT_SMALL, {
+        prompt: llmPrompt,
+        schema: outputSchema,
+        // strictObject: true, // strictObject is not a param for OBJECT_SMALL
+      })) as PingpalEmailMetadata["analysisResult"]; // Cast to the expected type
+
+      if (!parsedResponse) {
         logger.warn(
           `[ANALYZE_EMAIL] LLM returned empty response for email ID: ${emailDetails.messageId}`
         );
         llmErrorOccurred = true;
         // analysisResult remains undefined, will use a fallback for logging
       } else {
-        const parsedResponse = JSON.parse(llmResponseString);
-
         // Validate the structure and types of the parsed LLM response
+        // This basic validation can be enhanced if needed, but OBJECT_SMALL with schema helps.
         if (
           typeof parsedResponse.important !== "boolean" ||
           typeof parsedResponse.summary !== "string" ||
           typeof parsedResponse.reason_for_importance !== "string"
         ) {
           logger.error(
-            `[ANALYZE_EMAIL] LLM response validation failed for email ID ${emailDetails.messageId}: Invalid structure or types. Received:`,
+            `[ANALYZE_EMAIL] LLM response validation failed for email ID ${emailDetails.messageId}: Invalid structure or types after schema validation. Received:`,
             parsedResponse
           );
           llmErrorOccurred = true;
