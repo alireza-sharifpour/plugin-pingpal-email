@@ -5,7 +5,8 @@ import type { EmailDetails } from "../types"; // Assuming EmailDetails is in src
 // Helper function to escape characters for Telegram MarkdownV2
 function escapeMarkdownV2(text: string): string {
   // Escape characters: _ * [ ] ( ) ~ ` > # + - = | { } . !
-  return text.replace(/([_*[\\]()~`>#+\\-=|{}.!])/g, "\\\\$1");
+  // Note: Characters must be escaped with a preceding '\\'.
+  return text.replace(/([_*[\]()~`>#+\-=|{}.!])/g, "\\$1");
 }
 
 interface AnalysisResult {
@@ -40,12 +41,12 @@ export const sendTelegramNotificationAction: Action = {
       return false;
     }
 
-    const targetTelegramUserId = runtime.getSetting(
-      "pingpal_email.targetTelegramUserId"
-    );
-    const userEmailAddress = runtime.getSetting(
-      "pingpal_email.userEmailAddress"
-    );
+    const targetTelegramUserId =
+      runtime.getSetting("pingpal_email.targetTelegramUserId") ||
+      process.env.PINGPAL_TARGET_TELEGRAM_USERID;
+    const userEmailAddress =
+      runtime.getSetting("pingpal_email.userEmailAddress") ||
+      process.env.EMAIL_INCOMING_USER;
 
     if (!targetTelegramUserId) {
       logger.error(
@@ -89,7 +90,7 @@ export const sendTelegramNotificationAction: Action = {
         (telegramService as any).bot?.telegram?.sendMessage
       ) {
         await (telegramService as any).bot.telegram.sendMessage(
-          targetTelegramUserId || process.env.PINGPAL_TELEGRAM_USER_ID,
+          targetTelegramUserId || process.env.PINGPAL_TARGET_TELEGRAM_USERID,
           notificationText,
           { parse_mode: "MarkdownV2" }
         );
