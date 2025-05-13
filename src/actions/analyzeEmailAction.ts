@@ -4,14 +4,17 @@ import type { EmailDetails } from "../types";
 
 // Define a custom metadata interface that extends the base Memory metadata
 interface PingpalEmailMetadata {
-  originalEmailMessageId?: string;
-  senderEmailAddress?: string;
-  notifiedViaTelegram?: boolean;
-  analysisResult?: {
+  type: "pingpal_email_processed";
+  originalEmailMessageId: string;
+  senderEmailAddress: string;
+  notifiedViaTelegram: boolean;
+  analysisResult: {
     important: boolean;
     summary: string;
     reason_for_importance: string;
+    error?: string; // Added for error case
   };
+  [key: string]: unknown; // Added to satisfy CustomMetadata requirements
 }
 
 export const analyzeEmailAction: Action = {
@@ -83,8 +86,175 @@ export const analyzeEmailAction: Action = {
       `[ANALYZE_EMAIL] New email detected, proceeding with analysis: ${emailDetails.subject}`
     );
 
-    // The rest of the handler will be implemented in subsequent tasks
+    // --- LLM Interaction ---
+    let analysisResult: PingpalEmailMetadata["analysisResult"]; // To store the LLM analysis
+    let llmErrorOccurred = false; // Flag to track LLM processing status
 
+    const llmPrompt = `You are an assistant helping a user filter their email inbox. Analyze the following email.
+Email Subject: "${emailDetails.subject}"
+Email Body:
+"${emailDetails.bodyText}"
+
+1. Determine if this email requires the urgent attention or action of the user. Consider direct requests, deadlines, important announcements, or messages from key contacts.
+2. If it is important, provide a concise summary of the email in no more than 3 sentences.
+3. Also, provide a brief reason why this email was flagged as important.
+
+Respond ONLY with a JSON object matching this schema:
+{
+  "important": boolean, // true if the email is important, false otherwise
+  "summary": "string", // The 3-sentence (or less) summary if important, otherwise an empty string or null.
+  "reason_for_importance": "string" // Brief reason why it's important, or empty/null if not.
+}`;
+
+    try {
+      const llmResponseString = await runtime.useModel(ModelType.TEXT_SMALL, {
+        prompt: llmPrompt,
+        strictObject: true,
+      });
+
+      if (!llmResponseString) {
+        logger.warn(
+          `[ANALYZE_EMAIL] LLM returned empty response for email ID: ${emailDetails.messageId}`
+        );
+        llmErrorOccurred = true;
+        // analysisResult remains undefined, will use a fallback for logging
+      } else {
+        const parsedResponse = JSON.parse(llmResponseString);
+
+        // Validate the structure and types of the parsed LLM response
+        if (
+          typeof parsedResponse.important !== "boolean" ||
+          typeof parsedResponse.summary !== "string" ||
+          typeof parsedResponse.reason_for_importance !== "string"
+        ) {
+          logger.error(
+            `[ANALYZE_EMAIL] LLM response validation failed for email ID ${emailDetails.messageId}: Invalid structure or types. Received:`,
+            parsedResponse
+          );
+          llmErrorOccurred = true;
+          // analysisResult remains undefined, will use a fallback for logging
+        } else {
+          analysisResult = {
+            important: parsedResponse.important,
+            summary: parsedResponse.summary,
+            reason_for_importance: parsedResponse.reason_for_importance,
+          };
+        }
+      }
+    } catch (error) {
+      logger.error(
+        `[ANALYZE_EMAIL] LLM interaction or JSON parsing failed for email ID ${emailDetails.messageId}:`,
+        error
+      );
+      llmErrorOccurred = true;
+      // analysisResult remains undefined, will use a fallback for logging
+    }
+    // --- End of LLM Interaction ---
+
+    // Processed Email Logging
+    const analysisDataForLogging: PingpalEmailMetadata["analysisResult"] =
+      analysisResult && !llmErrorOccurred
+        ? analysisResult // analysisResult is the parsed LLM output if successful
+        : {
+            important: false,
+            summary: "",
+            reason_for_importance: "LLM processing failed",
+            error: "LLM_PROCESSING_FAILED",
+          };
+
+    const memoryToCreate = {
+      agentId: runtime.agentId,
+      roomId: "PINGPAL_EMAIL_MONITOR_INTERNAL" as any,
+      entityId: runtime.agentId,
+      content: { text: `Processed email subject: ${emailDetails.subject}` },
+      metadata: {
+        type: "pingpal_email_processed",
+        originalEmailMessageId: emailDetails.messageId,
+        senderEmailAddress: emailDetails.from, // Assuming emailDetails.from is available
+        notifiedViaTelegram: analysisResult?.important || false, // Uses the original parsed LLM output status
+        analysisResult: analysisDataForLogging,
+      } as PingpalEmailMetadata,
+    };
+
+    try {
+      await runtime.createMemory(memoryToCreate, "pingpal_email_processed");
+      logger.info(
+        `[ANALYZE_EMAIL] Successfully logged processed email ID: ${emailDetails.messageId}`
+      );
+    } catch (error) {
+      logger.error(
+        `[ANALYZE_EMAIL] Failed to log processed email ID ${emailDetails.messageId}:`,
+        error
+      );
+      // Depending on policy, an error here might also warrant returning false from the action.
+      // For now, we'll continue, but this could be a point of failure.
+    }
+    // End of Processed Email Logging
+
+    // --- Triggering SEND_EMAIL_TELEGRAM_NOTIFICATION ---
+    if (!llmErrorOccurred && analysisResult && analysisResult.important) {
+      logger.info(
+        `[ANALYZE_EMAIL] Email ID: ${emailDetails.messageId} marked as important. Attempting to trigger notification.`
+      );
+      const sendNotificationAction = runtime.actions.find(
+        (a) => a.name === "SEND_EMAIL_TELEGRAM_NOTIFICATION"
+      );
+
+      if (sendNotificationAction && sendNotificationAction.handler) {
+        try {
+          // Passing undefined for state.
+          // emailDetails is the original EmailDetails object for the current email.
+          // analysisResult is the direct output from the LLM.
+          await sendNotificationAction.handler(
+            runtime,
+            emailDetails as any, // Cast to any to satisfy linter for this specific action call
+            undefined,
+            { analysisResult }
+          );
+          logger.info(
+            `[ANALYZE_EMAIL] Call to SEND_EMAIL_TELEGRAM_NOTIFICATION handler completed for email ID: ${emailDetails.messageId}.`
+          );
+        } catch (error) {
+          logger.error(
+            `[ANALYZE_EMAIL] Error calling SEND_EMAIL_TELEGRAM_NOTIFICATION handler for email ID ${emailDetails.messageId}:`,
+            error
+          );
+          // The ANALYZE_EMAIL action itself does not fail if the triggered action errors out.
+          // That error should be logged by the sendNotificationAction itself.
+        }
+      } else {
+        logger.error(
+          `[ANALYZE_EMAIL] Action SEND_EMAIL_TELEGRAM_NOTIFICATION not found or handler is missing for email ID: ${emailDetails.messageId}.`
+        );
+      }
+    } else if (
+      !llmErrorOccurred &&
+      analysisResult &&
+      !analysisResult.important
+    ) {
+      logger.info(
+        `[ANALYZE_EMAIL] Email ID: ${emailDetails.messageId} not marked as important. No notification will be sent.`
+      );
+    } else if (llmErrorOccurred) {
+      // This condition implies analysisResult might be undefined or not reliably populated.
+      logger.warn(
+        `[ANALYZE_EMAIL] Skipping notification trigger for email ID: ${emailDetails.messageId} due to previous LLM error or undefined analysis result.`
+      );
+    }
+    // --- End of Triggering SEND_EMAIL_TELEGRAM_NOTIFICATION ---
+
+    // Final return logic for ANALYZE_EMAIL action:
+    // The action's success is primarily based on whether the email analysis and logging were performed.
+    // An error during LLM processing (llmErrorOccurred = true) is considered a failure of this action's core responsibility.
+    if (llmErrorOccurred) {
+      // Logging of this error state has been handled (e.g., by setting analysisResult.error).
+      // The logic above ensures no notification is attempted if llmErrorOccurred.
+      return false;
+    }
+
+    // If no LLM errors, the action (which includes analysis, logging, and attempting to trigger
+    // a notification if applicable) is considered to have completed its responsibilities successfully.
+    // Explicitly states "Return true (action completed)" after its steps.
     return true;
   },
 };
