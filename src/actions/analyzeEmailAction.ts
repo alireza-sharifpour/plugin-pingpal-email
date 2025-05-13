@@ -181,14 +181,17 @@ Respond ONLY with a JSON object matching this schema:
 
     const memoryToCreate = {
       agentId: runtime.agentId,
-      roomId: "PINGPAL_EMAIL_MONITOR_INTERNAL" as any,
-      entityId: runtime.agentId,
+      // Consider if runtime.agentId is the correct UUID to use here,
+      // or if another relevant UUID should be used.
+      // Using runtime.agentId as an example:
+      roomId: runtime.agentId,
+      entityId: runtime.agentId, // This also uses agentId
       content: { text: `Processed email subject: ${emailDetails.subject}` },
       metadata: {
         type: "pingpal_email_processed",
         originalEmailMessageId: emailDetails.messageId,
-        senderEmailAddress: emailDetails.from, // Assuming emailDetails.from is available
-        notifiedViaTelegram: analysisResult?.important || false, // Uses the original parsed LLM output status
+        senderEmailAddress: emailDetails.from,
+        notifiedViaTelegram: analysisResult?.important || false,
         analysisResult: analysisDataForLogging,
       } as PingpalEmailMetadata,
     };
