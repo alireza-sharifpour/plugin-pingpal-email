@@ -89,7 +89,7 @@ export const sendTelegramNotificationAction: Action = {
         (telegramService as any).bot?.telegram?.sendMessage
       ) {
         await (telegramService as any).bot.telegram.sendMessage(
-          targetTelegramUserId,
+          targetTelegramUserId || process.env.PINGPAL_TELEGRAM_USER_ID,
           notificationText,
           { parse_mode: "MarkdownV2" }
         );
