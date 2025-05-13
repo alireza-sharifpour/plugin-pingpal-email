@@ -63,6 +63,11 @@ const pingPalEmailPlugin: Plugin = {
   evaluators: [],
   async init(config: Record<string, string>, runtime: IAgentRuntime) {
     logger.info("Initializing PingPal Email Plugin (with imapflow)...");
+    const targetTelegramUserId =
+      runtime.getSetting("pingpal_email.targetTelegramUserId") ||
+      process.env.PINGPAL_TARGET_TELEGRAM_USERID;
+
+    console.log("TARGET TELEGRAM USER ID", targetTelegramUserId);
 
     const host =
       runtime.getSetting("EMAIL_INCOMING_HOST") ||
@@ -171,7 +176,7 @@ const pingPalEmailPlugin: Plugin = {
                   const msgData = await imapClient.fetchOne(uid.toString(), {
                     envelope: true,
                     bodyStructure: true,
-                    headers: ["message-id", "date"],
+                    headers: true,
                   });
 
                   let bodyText = "";
@@ -236,20 +241,23 @@ const pingPalEmailPlugin: Plugin = {
                   if (msgData.headers) {
                     if (msgData.headers instanceof Map) {
                       extractedMessageIdValue =
-                        msgData.headers.get("message-id");
+                        msgData.headers.get("message-id") ||
+                        msgData.headers.get("Message-ID") ||
+                        msgData.headers.get("Message-Id");
                     } else if (
                       typeof msgData.headers === "object" &&
                       msgData.headers !== null
                     ) {
                       const headersObj = msgData.headers as any;
-                      extractedMessageIdValue =
-                        headersObj["message-id"] ||
-                        headersObj["Message-ID"] ||
-                        headersObj["Message-Id"];
-                      if (extractedMessageIdValue === undefined) {
+                      const messageIdKey = Object.keys(headersObj).find(
+                        (key) => key.toLowerCase() === "message-id"
+                      );
+                      if (messageIdKey) {
+                        extractedMessageIdValue = headersObj[messageIdKey];
+                      } else {
                         logger.warn(
-                          `[PingPal Email] 'message-id' not found in headers object for UID ${uid}. Headers:`,
-                          Object.keys(headersObj)
+                          `[PingPal Email] 'message-id' not found in headers object for UID ${uid}. Headers: `,
+                          Object.keys(headersObj).join(", ")
                         );
                       }
                     } else {
