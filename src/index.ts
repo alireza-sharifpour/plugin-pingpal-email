@@ -1,10 +1,10 @@
-import type { Plugin } from "@elizaos/core";
+import type { Plugin, IAgentRuntime, UUID } from "@elizaos/core";
 import {
   type Action,
+  ChannelType,
   type Content,
   type GenerateTextParams,
   type HandlerCallback,
-  type IAgentRuntime,
   type Memory,
   ModelType,
   type Provider,
@@ -12,8 +12,14 @@ import {
   Service,
   type State,
   logger,
+  stringToUuid,
 } from "@elizaos/core";
 import { z } from "zod";
+import { ImapFlow } from "imapflow";
+import type { EmailDetails } from "./types";
+import { analyzeEmailAction } from "./actions/analyzeEmailAction";
+import { sendTelegramNotificationAction } from "./actions/sendTelegramNotificationAction";
+import { convert as htmlToTextConverter } from "html-to-text";
 
 /**
  * Defines the configuration schema for a plugin, including the validation rules for the plugin name.
@@ -49,248 +55,439 @@ const configSchema = z.object({
  * @property {Function} handler - Asynchronous function to handle the action and generate a response.
  * @property {Object[]} examples - An array of example inputs and expected outputs for the action.
  */
-const helloWorldAction: Action = {
-  name: "HELLO_WORLD",
-  similes: ["GREET", "SAY_HELLO"],
-  description: "Responds with a simple hello world message",
 
-  validate: async (
-    _runtime: IAgentRuntime,
-    _message: Memory,
-    _state: State
-  ): Promise<boolean> => {
-    // Always valid
-    return true;
-  },
-
-  handler: async (
-    _runtime: IAgentRuntime,
-    message: Memory,
-    _state: State,
-    _options: any,
-    callback: HandlerCallback,
-    _responses: Memory[]
-  ) => {
-    try {
-      logger.info("Handling HELLO_WORLD action");
-
-      // Simple response content
-      const responseContent: Content = {
-        text: "hello world!",
-        actions: ["HELLO_WORLD"],
-        source: message.content.source,
-      };
-
-      // Call back with the hello world message
-      await callback(responseContent);
-
-      return responseContent;
-    } catch (error) {
-      logger.error("Error in HELLO_WORLD action:", error);
-      throw error;
-    }
-  },
-
-  examples: [
-    [
-      {
-        name: "{{name1}}",
-        content: {
-          text: "Can you say hello?",
-        },
-      },
-      {
-        name: "{{name2}}",
-        content: {
-          text: "hello world!",
-          actions: ["HELLO_WORLD"],
-        },
-      },
-    ],
-  ],
+const getInternalRoomIdForAgent = (agentId: UUID): UUID => {
+  const agentSpecificRoomSuffix = agentId.slice(0, 13); // Or use the full agentId for more uniqueness
+  return stringToUuid(`pingpal-email-internal-room-${agentSpecificRoomSuffix}`);
 };
 
-/**
- * Example Hello World Provider
- * This demonstrates the simplest possible provider implementation
- */
-const helloWorldProvider: Provider = {
-  name: "HELLO_WORLD_PROVIDER",
-  description: "A simple example provider",
-
-  get: async (
-    _runtime: IAgentRuntime,
-    _message: Memory,
-    _state: State
-  ): Promise<ProviderResult> => {
-    return {
-      text: "I am a provider",
-      values: {},
-      data: {},
-    };
-  },
-};
-
-export class StarterService extends Service {
-  static serviceType = "starter";
-  capabilityDescription =
-    "This is a starter service which is attached to the agent through the starter plugin.";
-  constructor(protected runtime: IAgentRuntime) {
-    super(runtime);
-  }
-
-  static async start(runtime: IAgentRuntime) {
-    logger.info(
-      `*** Starting starter service - MODIFIED: ${new Date().toISOString()} ***`
-    );
-    const service = new StarterService(runtime);
-    return service;
-  }
-
-  static async stop(runtime: IAgentRuntime) {
-    logger.info("*** TESTING DEV MODE - STOP MESSAGE CHANGED! ***");
-    // get the service from the runtime
-    const service = runtime.getService(StarterService.serviceType);
-    if (!service) {
-      throw new Error("Starter service not found");
-    }
-    service.stop();
-  }
-
-  async stop() {
-    logger.info("*** THIRD CHANGE - TESTING FILE WATCHING! ***");
-  }
-}
-
-export const starterPlugin: Plugin = {
+const pingPalEmailPlugin: Plugin = {
   name: "plugin-pingpal-email",
-  description: "Plugin starter for elizaOS",
-  config: {
-    EXAMPLE_PLUGIN_VARIABLE: process.env.EXAMPLE_PLUGIN_VARIABLE,
-  },
-  async init(config: Record<string, string>) {
-    logger.info("*** TESTING DEV MODE - PLUGIN MODIFIED AND RELOADED! ***");
-    try {
-      const validatedConfig = await configSchema.parseAsync(config);
+  description:
+    "Monitors an email account using imapflow for important emails and notifies via Telegram.",
+  actions: [analyzeEmailAction, sendTelegramNotificationAction],
+  providers: [],
+  evaluators: [],
+  async init(config: Record<string, string>, runtime: IAgentRuntime) {
+    logger.info("Initializing PingPal Email Plugin (with imapflow)...");
 
-      // Set all environment variables at once
-      for (const [key, value] of Object.entries(validatedConfig)) {
-        if (value) process.env[key] = value;
-      }
+    const internalRoomId = getInternalRoomIdForAgent(runtime.agentId);
+    try {
+      await runtime.ensureRoomExists({
+        id: internalRoomId,
+        name: `PingPal Internal Logs - Agent ${runtime.agentId.slice(0, 8)}`,
+        source: "internal_pingpal_plugin", // Identifies this plugin as the source
+        type: ChannelType.SELF, // SELF type is suitable for agent-specific internal logs
+        // worldId: Optional - if this agent operates within a specific world context.
+        // For your standalone agent as per PRD, omitting worldId for this internal room is fine.
+      });
+      logger.info(
+        `[PingPal Email Plugin] Ensured internal logging room exists: ${internalRoomId}`
+      );
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        throw new Error(
-          `Invalid plugin configuration: ${error.errors.map((e) => e.message).join(", ")}`
+      logger.error(
+        "[PingPal Email Plugin] CRITICAL: Failed to create/ensure internal logging room. Memory logging will fail.",
+        error
+      );
+      // Depending on how critical this is, you might throw the error to stop plugin load
+      // throw new Error(`Failed to initialize PingPal internal room: ${error.message}`);
+    }
+
+    const targetTelegramUserId =
+      runtime.getSetting("pingpal_email.targetTelegramUserId") ||
+      process.env.PINGPAL_TARGET_TELEGRAM_USERID;
+
+    console.log("TARGET TELEGRAM USER ID", targetTelegramUserId);
+
+    const host =
+      runtime.getSetting("EMAIL_INCOMING_HOST") ||
+      process.env.EMAIL_INCOMING_HOST;
+    const port = parseInt(
+      runtime.getSetting("EMAIL_INCOMING_PORT") ||
+        process.env.EMAIL_INCOMING_PORT ||
+        "993",
+      10
+    );
+    const user =
+      runtime.getSetting("EMAIL_INCOMING_USER") ||
+      process.env.EMAIL_INCOMING_USER;
+    const pass =
+      runtime.getSetting("EMAIL_INCOMING_PASS") ||
+      process.env.EMAIL_INCOMING_PASS;
+    const secure =
+      (runtime.getSetting("EMAIL_INCOMING_SECURE") ||
+        process.env.EMAIL_INCOMING_SECURE) !== "false"; // Defaults to true
+    const mailbox =
+      runtime.getSetting("EMAIL_INCOMING_MAILBOX") ||
+      process.env.EMAIL_INCOMING_MAILBOX ||
+      "INBOX";
+
+    const emailLookbackHours = parseInt(
+      runtime.getSetting("pingpal_email.lookbackHours") ||
+        process.env.PINGPAL_EMAIL_LOOKBACK_HOURS ||
+        "24", // Default to 24 hours
+      10
+    );
+
+    if (!host || !user || !pass) {
+      logger.error(
+        "[PingPal Email] Missing required IMAP settings. Please check EMAIL_INCOMING_HOST, EMAIL_INCOMING_USER, EMAIL_INCOMING_PASS."
+      );
+      return;
+    }
+
+    const imapClient = new ImapFlow({
+      host,
+      port,
+      secure,
+      auth: { user, pass },
+      logger: false, // Set to true or custom logger for detailed IMAP logs
+    });
+
+    imapClient.on("error", (err: Error) => {
+      logger.error("[PingPal Email] IMAP Flow Error:", err);
+      // Consider implementing reconnection logic here or in monitorEmails
+    });
+
+    const streamToString = async (
+      stream: NodeJS.ReadableStream
+    ): Promise<string> => {
+      const chunks: Buffer[] = [];
+      return new Promise((resolve, reject) => {
+        stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        stream.on("error", (err) => reject(err));
+        stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      });
+    };
+
+    const htmlToText = (html: string): string => {
+      return htmlToTextConverter(html, {
+        wordwrap: false, // Or your preferred wordwrap column, e.g., 130. false disables it.
+        selectors: [
+          { selector: "img", format: "skip" },
+          { selector: "hr", format: "skip" },
+        ],
+      });
+    };
+
+    const monitorEmails = async () => {
+      try {
+        if (!imapClient.usable) {
+          logger.info(
+            "[PingPal Email] Attempting to connect to IMAP server..."
+          );
+          await imapClient.connect();
+          logger.info("[PingPal Email] Connected to IMAP server.");
+        }
+
+        logger.info(`[PingPal Email] Opening mailbox: ${mailbox}...`);
+        await imapClient.mailboxOpen(mailbox);
+        logger.info(`[PingPal Email] Mailbox "${mailbox}" opened.`);
+
+        imapClient.on(
+          "exists",
+          async (data: {
+            count: number;
+            prevCount: number | null;
+            path: string;
+          }) => {
+            const previousCount = data.prevCount === null ? 0 : data.prevCount;
+            if (data.count > previousCount) {
+              logger.info(
+                `[PingPal Email] New email(s) detected. Current count: ${data.count}, Previous count: ${previousCount}`
+              );
+              const lock = await imapClient.getMailboxLock(mailbox);
+              try {
+                const sinceDate = new Date();
+                sinceDate.setHours(sinceDate.getHours() - emailLookbackHours);
+
+                // Format date for logging, ImapFlow should handle Date object directly
+                const formattedSinceDate = sinceDate.toISOString();
+                logger.info(
+                  `[PingPal Email] Searching for unseen messages since ${formattedSinceDate} (approx. last ${emailLookbackHours} hours).`
+                );
+
+                const uidsToFetch = await imapClient.search(
+                  { unseen: true, since: sinceDate },
+                  { uid: true }
+                );
+
+                logger.info(
+                  `[PingPal Email] Found ${uidsToFetch.length} unseen message(s).`
+                );
+
+                for (const uid of uidsToFetch) {
+                  logger.info(
+                    `[PingPal Email] Fetching message UID: ${uid}...`
+                  );
+                  const msgData = await imapClient.fetchOne(uid.toString(), {
+                    envelope: true,
+                    bodyStructure: true,
+                    headers: true,
+                  });
+
+                  let bodyText = "";
+                  let textPartInfo = msgData.bodyStructure?.childNodes?.find(
+                    (part) => part.type === "text/plain"
+                  );
+
+                  if (textPartInfo?.part) {
+                    const downloadedPart = await imapClient.download(
+                      uid.toString(),
+                      textPartInfo.part,
+                      { uid: true }
+                    );
+                    if (downloadedPart?.content) {
+                      bodyText = await streamToString(downloadedPart.content);
+                    }
+                  } else {
+                    let htmlPartInfo = msgData.bodyStructure?.childNodes?.find(
+                      (part) => part.type === "text/html"
+                    );
+                    if (htmlPartInfo?.part) {
+                      const downloadedHtmlPart = await imapClient.download(
+                        uid.toString(),
+                        htmlPartInfo.part,
+                        { uid: true }
+                      );
+                      if (downloadedHtmlPart?.content) {
+                        const htmlContent = await streamToString(
+                          downloadedHtmlPart.content
+                        );
+                        bodyText = htmlToText(htmlContent);
+                      }
+                    } else {
+                      const firstTextPart =
+                        msgData.bodyStructure?.childNodes?.find((part) =>
+                          part.type?.startsWith("text/")
+                        );
+                      if (firstTextPart?.part) {
+                        logger.warn(
+                          `[PingPal Email] No explicit text/plain or text/html part for UID ${uid}. Attempting first available text part: ${firstTextPart.type}`
+                        );
+                        const downloadedFallbackPart =
+                          await imapClient.download(
+                            uid.toString(),
+                            firstTextPart.part,
+                            { uid: true }
+                          );
+                        if (downloadedFallbackPart?.content) {
+                          bodyText = await streamToString(
+                            downloadedFallbackPart.content
+                          );
+                        }
+                      } else {
+                        logger.warn(
+                          `[PingPal Email] No text/plain or text/html part found for UID ${uid}. Body will be empty.`
+                        );
+                      }
+                    }
+                  }
+
+                  let finalMessageId: string;
+                  const messageIdFromEnvelope: string | undefined =
+                    msgData.envelope?.messageId;
+
+                  if (
+                    messageIdFromEnvelope &&
+                    typeof messageIdFromEnvelope === "string" &&
+                    messageIdFromEnvelope.trim() !== ""
+                  ) {
+                    finalMessageId = messageIdFromEnvelope.trim();
+                    logger.info(
+                      `[PingPal Email] Extracted Message-ID from envelope: "${finalMessageId}" for UID ${uid}.`
+                    );
+                  } else {
+                    logger.warn(
+                      `[PingPal Email] Message-ID not found or empty in envelope for UID ${uid} (envelope.messageId was: "${messageIdFromEnvelope}"). Attempting to parse from raw headers.`
+                    );
+
+                    let messageIdFromRawHeaders: string | undefined;
+                    if (msgData.headers instanceof Buffer) {
+                      const rawHeadersString = msgData.headers.toString("utf8");
+                      // Log a truncated version of headers to prevent flooding logs
+                      const loggableHeaders =
+                        rawHeadersString.length > 1000
+                          ? rawHeadersString.substring(0, 1000) +
+                            "... (truncated)"
+                          : rawHeadersString;
+                      logger.info(
+                        `[PingPal Email] Raw headers for UID ${uid} (Buffer length: ${msgData.headers.length}):\\n${loggableHeaders}`
+                      );
+
+                      // Regex to find Message-ID in raw headers (case-insensitive)
+                      const regex = /^Message-ID:\s*([^\r\n]+)/im;
+                      const match = rawHeadersString.match(regex);
+                      if (match && match[1]) {
+                        messageIdFromRawHeaders = match[1].trim();
+                        logger.info(
+                          `[PingPal Email] Extracted Message-ID from raw headers: "${messageIdFromRawHeaders}" for UID ${uid}.`
+                        );
+                      } else {
+                        logger.warn(
+                          `[PingPal Email] Could not parse Message-ID from raw headers for UID ${uid}.`
+                        );
+                      }
+                    } else if (msgData.headers) {
+                      // Log if headers is present but not a Buffer, truncated to avoid large logs
+                      const headersPreview = JSON.stringify(msgData.headers);
+                      logger.warn(
+                        `[PingPal Email] msgData.headers is present but not a Buffer for UID ${uid}. Type: ${typeof msgData.headers}. Value (preview): ${headersPreview.substring(0, 200)}${headersPreview.length > 200 ? "..." : ""}`
+                      );
+                    }
+
+                    if (
+                      messageIdFromRawHeaders &&
+                      typeof messageIdFromRawHeaders === "string" &&
+                      messageIdFromRawHeaders.trim() !== ""
+                    ) {
+                      finalMessageId = messageIdFromRawHeaders.trim();
+                    } else {
+                      const fallbackId = `pingpal-no-id-${uid}-${msgData.envelope?.date?.toISOString() || Date.now()}`;
+                      logger.warn(
+                        `[PingPal Email] Could not extract valid Message-ID from envelope or raw headers for UID ${uid}. Generating fallback ID: "${fallbackId}".`
+                      );
+                      finalMessageId = fallbackId;
+                    }
+                  }
+
+                  const emailDetails: EmailDetails = {
+                    messageId: finalMessageId,
+                    from:
+                      msgData.envelope.from?.[0]?.mailbox &&
+                      msgData.envelope.from?.[0]?.host
+                        ? `${msgData.envelope.from[0].mailbox}@${msgData.envelope.from[0].host}`
+                        : msgData.envelope.from?.[0]?.name || "Unknown Sender",
+                    to:
+                      msgData.envelope.to?.map((addr) =>
+                        addr.mailbox && addr.host
+                          ? `${addr.mailbox}@${addr.host}`
+                          : addr.name || "Unknown Recipient"
+                      ) || [],
+                    subject: msgData.envelope.subject || "No Subject",
+                    bodyText: bodyText,
+                  };
+
+                  logger.info(
+                    `[PingPal Email] Processing email: Subject - "${emailDetails.subject}", From - "${emailDetails.from}", Message-ID - "${emailDetails.messageId}"`
+                  );
+                  const analyzeAction = runtime.actions.find(
+                    (a) => a.name === "ANALYZE_EMAIL"
+                  );
+                  if (analyzeAction?.handler) {
+                    try {
+                      await analyzeAction.handler(
+                        runtime,
+                        emailDetails as any,
+                        undefined,
+                        undefined
+                      );
+                    } catch (actionError) {
+                      logger.error(
+                        `[PingPal Email] Error executing ANALYZE_EMAIL action for UID ${uid}:`,
+                        actionError
+                      );
+                    }
+                  } else {
+                    logger.error(
+                      "[PingPal Email] ANALYZE_EMAIL action not found."
+                    );
+                  }
+                }
+              } catch (fetchErr) {
+                logger.error(
+                  "[PingPal Email] Error fetching or processing messages:",
+                  fetchErr
+                );
+              } finally {
+                lock.release();
+              }
+            }
+          }
+        );
+
+        logger.info("[PingPal Email] Starting IDLE mode...");
+        try {
+          await imapClient.idle();
+          logger.info("[PingPal Email] IDLE mode stopped gracefully.");
+        } catch (idleErr) {
+          logger.error(
+            "[PingPal Email] IDLE mode error or connection lost:",
+            idleErr
+          );
+          if (imapClient.usable === false) {
+            logger.info(
+              "[PingPal Email] Connection lost during IDLE. Attempting to reconnect in 30 seconds..."
+            );
+            setTimeout(monitorEmails, 30000);
+          } else {
+            logger.info(
+              "[PingPal Email] IDLE ended, but client still usable. Will attempt to restart IDLE in 10 seconds."
+            );
+            setTimeout(async () => {
+              try {
+                if (imapClient.usable) {
+                  await imapClient.idle();
+                }
+              } catch (reIdleErr) {
+                logger.error(
+                  "[PingPal Email] Failed to restart IDLE:",
+                  reIdleErr
+                );
+                setTimeout(monitorEmails, 30000);
+              }
+            }, 10000);
+          }
+        }
+      } catch (err) {
+        logger.error("[PingPal Email] Main monitoring function error:", err);
+        logger.info("[PingPal Email] Attempting to reconnect in 60 seconds...");
+        if (imapClient.usable) {
+          try {
+            await imapClient.logout();
+          } catch (logoutErr) {
+            logger.error(
+              "[PingPal Email] Error during logout after main error:",
+              logoutErr
+            );
+            imapClient.close();
+          }
+        } else {
+          imapClient.close();
+        }
+        setTimeout(monitorEmails, 60000);
+      }
+    };
+
+    monitorEmails();
+
+    const gracefulShutdown = async () => {
+      logger.info(
+        "[PingPal Email] Attempting graceful shutdown of IMAP client..."
+      );
+      if (imapClient && imapClient.usable) {
+        try {
+          await imapClient.logout();
+          logger.info("[PingPal Email] IMAP client logged out successfully.");
+        } catch (err) {
+          logger.error("[PingPal Email] Error during IMAP logout:", err);
+          imapClient.close();
+        }
+      } else if (imapClient) {
+        imapClient.close();
+        logger.info(
+          "[PingPal Email] IMAP client closed (was not in a usable state)."
         );
       }
-      throw error;
-    }
+    };
+
+    process.on("SIGINT", gracefulShutdown);
+    process.on("SIGTERM", gracefulShutdown);
+
+    logger.info(
+      "PingPal Email Plugin (with imapflow) initialized and monitoring started."
+    );
   },
-  models: {
-    [ModelType.TEXT_SMALL]: async (
-      _runtime,
-      { prompt, stopSequences = [] }: GenerateTextParams
-    ) => {
-      return "Never gonna give you up, never gonna let you down, never gonna run around and desert you...";
-    },
-    [ModelType.TEXT_LARGE]: async (
-      _runtime,
-      {
-        prompt,
-        stopSequences = [],
-        maxTokens = 8192,
-        temperature = 0.7,
-        frequencyPenalty = 0.7,
-        presencePenalty = 0.7,
-      }: GenerateTextParams
-    ) => {
-      return "Never gonna make you cry, never gonna say goodbye, never gonna tell a lie and hurt you...";
-    },
-  },
-  tests: [
-    {
-      name: "plugin_starter_test_suite",
-      tests: [
-        {
-          name: "example_test",
-          fn: async (runtime) => {
-            logger.debug("example_test run by ", runtime.character.name);
-            // Add a proper assertion that will pass
-            if (runtime.character.name !== "Eliza") {
-              throw new Error(
-                `Expected character name to be "Eliza" but got "${runtime.character.name}"`
-              );
-            }
-            // Verify the plugin is loaded properly
-            const service = runtime.getService("starter");
-            if (!service) {
-              throw new Error("Starter service not found");
-            }
-            // Don't return anything to match the void return type
-          },
-        },
-        {
-          name: "should_have_hello_world_action",
-          fn: async (runtime) => {
-            // Check if the hello world action is registered
-            // Look for the action in our plugin's actions
-            // The actual action name in this plugin is "helloWorld", not "hello"
-            const actionExists = starterPlugin.actions.some(
-              (a) => a.name === "HELLO_WORLD"
-            );
-            if (!actionExists) {
-              throw new Error("Hello world action not found in plugin");
-            }
-          },
-        },
-      ],
-    },
-  ],
-  routes: [
-    {
-      path: "/helloworld",
-      type: "GET",
-      handler: async (_req: any, res: any) => {
-        // send a response
-        res.json({
-          message: "Hello World!",
-        });
-      },
-    },
-  ],
-  events: {
-    MESSAGE_RECEIVED: [
-      async (params) => {
-        logger.debug("MESSAGE_RECEIVED event received");
-        // print the keys
-        logger.debug(Object.keys(params));
-      },
-    ],
-    VOICE_MESSAGE_RECEIVED: [
-      async (params) => {
-        logger.debug("VOICE_MESSAGE_RECEIVED event received");
-        // print the keys
-        logger.debug(Object.keys(params));
-      },
-    ],
-    WORLD_CONNECTED: [
-      async (params) => {
-        logger.debug("WORLD_CONNECTED event received");
-        // print the keys
-        logger.debug(Object.keys(params));
-      },
-    ],
-    WORLD_JOINED: [
-      async (params) => {
-        logger.debug("WORLD_JOINED event received");
-        // print the keys
-        logger.debug(Object.keys(params));
-      },
-    ],
-  },
-  services: [StarterService],
-  actions: [helloWorldAction],
-  providers: [helloWorldProvider],
 };
 
-export default starterPlugin;
+export default pingPalEmailPlugin;

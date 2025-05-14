@@ -34,12 +34,15 @@
     "@elizaos/plugin-openai": "^1.0.0-beta.49",
     "@elizaos/plugin-sql": "^1.0.0-beta.49",
     "@elizaos/plugin-telegram": "^1.0.0-beta.49",
+    "html-to-text": "^9.0.5",
+    "imapflow": "^1.0.186",
     "zod": "3.24.2"
   },
   "devDependencies": {
+    "@types/html-to-text": "^9.0.4",
+    "prettier": "3.5.3",
     "tsup": "8.4.0",
-    "typescript": "5.8.2",
-    "prettier": "3.5.3"
+    "typescript": "5.8.2"
   },
   "scripts": {
     "start": "elizaos start",
