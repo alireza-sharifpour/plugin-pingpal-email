@@ -122,6 +122,13 @@ const pingPalEmailPlugin: Plugin = {
       process.env.EMAIL_INCOMING_MAILBOX ||
       "INBOX";
 
+    const emailLookbackHours = parseInt(
+      runtime.getSetting("pingpal_email.lookbackHours") ||
+        process.env.PINGPAL_EMAIL_LOOKBACK_HOURS ||
+        "24", // Default to 24 hours
+      10
+    );
+
     if (!host || !user || !pass) {
       logger.error(
         "[PingPal Email] Missing required IMAP settings. Please check EMAIL_INCOMING_HOST, EMAIL_INCOMING_USER, EMAIL_INCOMING_PASS."
@@ -191,10 +198,20 @@ const pingPalEmailPlugin: Plugin = {
               );
               const lock = await imapClient.getMailboxLock(mailbox);
               try {
+                const sinceDate = new Date();
+                sinceDate.setHours(sinceDate.getHours() - emailLookbackHours);
+
+                // Format date for logging, ImapFlow should handle Date object directly
+                const formattedSinceDate = sinceDate.toISOString();
+                logger.info(
+                  `[PingPal Email] Searching for unseen messages since ${formattedSinceDate} (approx. last ${emailLookbackHours} hours).`
+                );
+
                 const uidsToFetch = await imapClient.search(
-                  { unseen: true },
+                  { unseen: true, since: sinceDate },
                   { uid: true }
                 );
+
                 logger.info(
                   `[PingPal Email] Found ${uidsToFetch.length} unseen message(s).`
                 );
