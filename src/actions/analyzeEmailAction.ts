@@ -1,5 +1,5 @@
-import type { Action, IAgentRuntime, Memory } from "@elizaos/core";
-import { logger, ModelType } from "@elizaos/core";
+import type { Action, IAgentRuntime, Memory, UUID } from "@elizaos/core";
+import { logger, ModelType, stringToUuid } from "@elizaos/core";
 import type { EmailDetails } from "../types";
 
 // Define a custom metadata interface that extends the base Memory metadata
@@ -16,6 +16,11 @@ interface PingpalEmailMetadata {
   };
   [key: string]: unknown; // Added to satisfy CustomMetadata requirements
 }
+
+const getInternalRoomIdForAgent = (agentId: UUID): UUID => {
+  const agentSpecificRoomSuffix = agentId.slice(0, 13);
+  return stringToUuid(`pingpal-email-internal-room-${agentSpecificRoomSuffix}`);
+};
 
 export const analyzeEmailAction: Action = {
   name: "ANALYZE_EMAIL",
@@ -168,6 +173,8 @@ Respond ONLY with a JSON object matching this schema:
     }
     // --- End of LLM Interaction ---
 
+    const internalRoomId: UUID = getInternalRoomIdForAgent(runtime.agentId);
+
     // Processed Email Logging
     const analysisDataForLogging: PingpalEmailMetadata["analysisResult"] =
       analysisResult && !llmErrorOccurred
@@ -184,7 +191,7 @@ Respond ONLY with a JSON object matching this schema:
       // Consider if runtime.agentId is the correct UUID to use here,
       // or if another relevant UUID should be used.
       // Using runtime.agentId as an example:
-      roomId: runtime.agentId,
+      roomId: internalRoomId,
       entityId: runtime.agentId, // This also uses agentId
       content: { text: `Processed email subject: ${emailDetails.subject}` },
       metadata: {
