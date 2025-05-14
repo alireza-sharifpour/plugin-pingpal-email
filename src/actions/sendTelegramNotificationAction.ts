@@ -80,7 +80,7 @@ export const sendTelegramNotificationAction: Action = {
     const escapedSummary = escapeMarkdownV2(summary);
     const displayEmailAddress = escapeMarkdownV2(userEmailAddress);
 
-    const notificationText = `*🔔 PingPal Alert: Important Email*\\n\\n*From:* ${sender}\\n*Summary:* ${escapedSummary}\\n\\nCheck your inbox @ ${displayEmailAddress}`;
+    const notificationText = `*🔔 PingPal Alert: Important Email*\n\n*From:* ${sender}\n*Summary:* ${escapedSummary}\n\nCheck your inbox @ ${displayEmailAddress}`;
 
     try {
       const telegramService = runtime.getService("telegram");
