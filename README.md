@@ -1,4 +1,4 @@
-# PingPal Email-to-Telegram Monitor Plugin
+# PingPal Email-to-Telegram Monitor Plugin (plugin-pingpal-email)
 
 This ElizaOS plugin, `plugin-pingpal-email`, monitors a specified email account for incoming emails, analyzes their importance using a Language Model (LLM), and sends notifications for critical emails to a designated Telegram chat. It is designed to help users manage email overload by filtering out noise and ensuring timely awareness of important messages.
 
