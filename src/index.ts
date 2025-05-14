@@ -1,6 +1,7 @@
-import type { Plugin, IAgentRuntime } from "@elizaos/core";
+import type { Plugin, IAgentRuntime, UUID } from "@elizaos/core";
 import {
   type Action,
+  ChannelType,
   type Content,
   type GenerateTextParams,
   type HandlerCallback,
@@ -11,6 +12,7 @@ import {
   Service,
   type State,
   logger,
+  stringToUuid,
 } from "@elizaos/core";
 import { z } from "zod";
 import { ImapFlow } from "imapflow";
@@ -54,6 +56,11 @@ const configSchema = z.object({
  * @property {Object[]} examples - An array of example inputs and expected outputs for the action.
  */
 
+const getInternalRoomIdForAgent = (agentId: UUID): UUID => {
+  const agentSpecificRoomSuffix = agentId.slice(0, 13); // Or use the full agentId for more uniqueness
+  return stringToUuid(`pingpal-email-internal-room-${agentSpecificRoomSuffix}`);
+};
+
 const pingPalEmailPlugin: Plugin = {
   name: "plugin-pingpal-email",
   description:
@@ -63,6 +70,29 @@ const pingPalEmailPlugin: Plugin = {
   evaluators: [],
   async init(config: Record<string, string>, runtime: IAgentRuntime) {
     logger.info("Initializing PingPal Email Plugin (with imapflow)...");
+
+    const internalRoomId = getInternalRoomIdForAgent(runtime.agentId);
+    try {
+      await runtime.ensureRoomExists({
+        id: internalRoomId,
+        name: `PingPal Internal Logs - Agent ${runtime.agentId.slice(0, 8)}`,
+        source: "internal_pingpal_plugin", // Identifies this plugin as the source
+        type: ChannelType.SELF, // SELF type is suitable for agent-specific internal logs
+        // worldId: Optional - if this agent operates within a specific world context.
+        // For your standalone agent as per PRD, omitting worldId for this internal room is fine.
+      });
+      logger.info(
+        `[PingPal Email Plugin] Ensured internal logging room exists: ${internalRoomId}`
+      );
+    } catch (error) {
+      logger.error(
+        "[PingPal Email Plugin] CRITICAL: Failed to create/ensure internal logging room. Memory logging will fail.",
+        error
+      );
+      // Depending on how critical this is, you might throw the error to stop plugin load
+      // throw new Error(`Failed to initialize PingPal internal room: ${error.message}`);
+    }
+
     const targetTelegramUserId =
       runtime.getSetting("pingpal_email.targetTelegramUserId") ||
       process.env.PINGPAL_TARGET_TELEGRAM_USERID;
@@ -237,52 +267,75 @@ const pingPalEmailPlugin: Plugin = {
                     }
                   }
 
-                  let extractedMessageIdValue: string | string[] | undefined;
-                  if (msgData.headers) {
-                    if (msgData.headers instanceof Map) {
-                      extractedMessageIdValue =
-                        msgData.headers.get("message-id") ||
-                        msgData.headers.get("Message-ID") ||
-                        msgData.headers.get("Message-Id");
-                    } else if (
-                      typeof msgData.headers === "object" &&
-                      msgData.headers !== null
-                    ) {
-                      const headersObj = msgData.headers as any;
-                      const messageIdKey = Object.keys(headersObj).find(
-                        (key) => key.toLowerCase() === "message-id"
+                  let finalMessageId: string;
+                  const messageIdFromEnvelope: string | undefined =
+                    msgData.envelope?.messageId;
+
+                  if (
+                    messageIdFromEnvelope &&
+                    typeof messageIdFromEnvelope === "string" &&
+                    messageIdFromEnvelope.trim() !== ""
+                  ) {
+                    finalMessageId = messageIdFromEnvelope.trim();
+                    logger.info(
+                      `[PingPal Email] Extracted Message-ID from envelope: "${finalMessageId}" for UID ${uid}.`
+                    );
+                  } else {
+                    logger.warn(
+                      `[PingPal Email] Message-ID not found or empty in envelope for UID ${uid} (envelope.messageId was: "${messageIdFromEnvelope}"). Attempting to parse from raw headers.`
+                    );
+
+                    let messageIdFromRawHeaders: string | undefined;
+                    if (msgData.headers instanceof Buffer) {
+                      const rawHeadersString = msgData.headers.toString("utf8");
+                      // Log a truncated version of headers to prevent flooding logs
+                      const loggableHeaders =
+                        rawHeadersString.length > 1000
+                          ? rawHeadersString.substring(0, 1000) +
+                            "... (truncated)"
+                          : rawHeadersString;
+                      logger.info(
+                        `[PingPal Email] Raw headers for UID ${uid} (Buffer length: ${msgData.headers.length}):\\n${loggableHeaders}`
                       );
-                      if (messageIdKey) {
-                        extractedMessageIdValue = headersObj[messageIdKey];
+
+                      // Regex to find Message-ID in raw headers (case-insensitive)
+                      const regex = /^Message-ID:\s*([^\r\n]+)/im;
+                      const match = rawHeadersString.match(regex);
+                      if (match && match[1]) {
+                        messageIdFromRawHeaders = match[1].trim();
+                        logger.info(
+                          `[PingPal Email] Extracted Message-ID from raw headers: "${messageIdFromRawHeaders}" for UID ${uid}.`
+                        );
                       } else {
                         logger.warn(
-                          `[PingPal Email] 'message-id' not found in headers object for UID ${uid}. Headers: `,
-                          Object.keys(headersObj).join(", ")
+                          `[PingPal Email] Could not parse Message-ID from raw headers for UID ${uid}.`
                         );
                       }
-                    } else {
+                    } else if (msgData.headers) {
+                      // Log if headers is present but not a Buffer, truncated to avoid large logs
+                      const headersPreview = JSON.stringify(msgData.headers);
                       logger.warn(
-                        `[PingPal Email] msgData.headers is not a Map or a recognized object for UID ${uid}. Type: ${typeof msgData.headers}`
+                        `[PingPal Email] msgData.headers is present but not a Buffer for UID ${uid}. Type: ${typeof msgData.headers}. Value (preview): ${headersPreview.substring(0, 200)}${headersPreview.length > 200 ? "..." : ""}`
                       );
+                    }
+
+                    if (
+                      messageIdFromRawHeaders &&
+                      typeof messageIdFromRawHeaders === "string" &&
+                      messageIdFromRawHeaders.trim() !== ""
+                    ) {
+                      finalMessageId = messageIdFromRawHeaders.trim();
+                    } else {
+                      const fallbackId = `pingpal-no-id-${uid}-${msgData.envelope?.date?.toISOString() || Date.now()}`;
+                      logger.warn(
+                        `[PingPal Email] Could not extract valid Message-ID from envelope or raw headers for UID ${uid}. Generating fallback ID: "${fallbackId}".`
+                      );
+                      finalMessageId = fallbackId;
                     }
                   }
 
-                  let messageId = "";
-                  if (Array.isArray(extractedMessageIdValue)) {
-                    messageId = extractedMessageIdValue[0] || "";
-                  } else if (typeof extractedMessageIdValue === "string") {
-                    messageId = extractedMessageIdValue;
-                  }
-
-                  if (!messageId) {
-                    logger.warn(
-                      `[PingPal Email] Could not extract Message-ID for UID ${uid}. Generating a fallback.`
-                    );
-                    messageId = `pingpal-no-id-${uid}-${msgData.envelope.date?.toISOString() || Date.now()}`;
-                  }
-
                   const emailDetails: EmailDetails = {
-                    messageId: messageId.trim(),
+                    messageId: finalMessageId,
                     from:
                       msgData.envelope.from?.[0]?.mailbox &&
                       msgData.envelope.from?.[0]?.host
