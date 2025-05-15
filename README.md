@@ -107,7 +107,7 @@ export const character: Character = {
     OPENAI_API_KEY: process.env.OPENAI_API_KEY, // Or your LLM provider key
 
     // PingPal Email Plugin specific settings
-    pingpal_email: {
+    pingpal: {
       targetTelegramUserId: process.env.PINGPAL_TARGET_TELEGRAM_USERID,
       // This is the email address being monitored, used for display in the notification text.
       userEmailAddress: process.env.EMAIL_INCOMING_USER,
@@ -171,15 +171,15 @@ Example from the template (customize as needed for what this plugin _uniquely_ b
 "agentConfig": {
   "pluginType": "elizaos:plugin:1.0.0",
   "pluginParameters": {
-    "pingpal_email.targetTelegramUserId": {
+    "pingpal.targetTelegramUserId": {
       "type": "string",
       "description": "The numerical Telegram User ID to send notifications to."
     },
-    "pingpal_email.userEmailAddress": {
+    "pingpal.userEmailAddress": {
       "type": "string",
       "description": "The email address being monitored (used for display in notifications)."
     },
-    "pingpal_email.lookbackHours": {
+    "pingpal.lookbackHours": {
       "type": "string",
       "description": "Optional. How many hours back to check for unseen emails on startup. Defaults to 24."
     }
@@ -192,12 +192,3 @@ Example from the template (customize as needed for what this plugin _uniquely_ b
 ```
 
 Customize this section to accurately reflect settings specific to `plugin-pingpal-email` that a user would configure within their agent's `character.settings.pingpal_email` block.
-
-## Documentation
-
-Provide clear documentation about:
-
-- What your plugin does
-- How to use it
-- Required API keys or credentials
-- Example usage
