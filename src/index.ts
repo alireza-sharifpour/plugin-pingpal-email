@@ -94,7 +94,7 @@ const pingPalEmailPlugin: Plugin = {
     }
 
     const targetTelegramUserId =
-      runtime.getSetting("pingpal_email.targetTelegramUserId") ||
+      runtime.getSetting("pingpal.targetTelegramUserId") ||
       process.env.PINGPAL_TARGET_TELEGRAM_USERID;
 
     console.log("TARGET TELEGRAM USER ID", targetTelegramUserId);
@@ -123,7 +123,7 @@ const pingPalEmailPlugin: Plugin = {
       "INBOX";
 
     const emailLookbackHours = parseInt(
-      runtime.getSetting("pingpal_email.lookbackHours") ||
+      runtime.getSetting("pingpal.lookbackHours") ||
         process.env.PINGPAL_EMAIL_LOOKBACK_HOURS ||
         "24", // Default to 24 hours
       10

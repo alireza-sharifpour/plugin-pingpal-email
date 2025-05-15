@@ -42,10 +42,10 @@ export const sendTelegramNotificationAction: Action = {
     }
 
     const targetTelegramUserId =
-      runtime.getSetting("pingpal_email.targetTelegramUserId") ||
+      runtime.getSetting("pingpal.targetTelegramUserId") ||
       process.env.PINGPAL_TARGET_TELEGRAM_USERID;
     const userEmailAddress =
-      runtime.getSetting("pingpal_email.userEmailAddress") ||
+      runtime.getSetting("pingpal.userEmailAddress") ||
       process.env.EMAIL_INCOMING_USER;
 
     if (!targetTelegramUserId) {
