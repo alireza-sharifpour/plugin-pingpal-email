@@ -359,17 +359,17 @@ const pingPalEmailPlugin: Plugin = {
                   const emailDetails: EmailDetails = {
                     messageId: finalMessageId,
                     from:
-                      msgData.envelope.from?.[0]?.mailbox &&
-                      msgData.envelope.from?.[0]?.host
-                        ? `${msgData.envelope.from[0].mailbox}@${msgData.envelope.from[0].host}`
-                        : msgData.envelope.from?.[0]?.name || "Unknown Sender",
+                      msgData.envelope?.from?.[0]?.mailbox &&
+                      msgData.envelope?.from?.[0]?.host
+                        ? `${msgData.envelope?.from[0].mailbox}@${msgData.envelope?.from[0].host}`
+                        : msgData.envelope?.from?.[0]?.name || "Unknown Sender",
                     to:
-                      msgData.envelope.to?.map((addr) =>
+                      msgData.envelope?.to?.map((addr) =>
                         addr.mailbox && addr.host
                           ? `${addr.mailbox}@${addr.host}`
                           : addr.name || "Unknown Recipient"
                       ) || [],
-                    subject: msgData.envelope.subject || "No Subject",
+                    subject: msgData.envelope?.subject || "No Subject",
                     bodyText: bodyText,
                   };
 
