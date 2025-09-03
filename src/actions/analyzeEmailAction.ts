@@ -193,7 +193,6 @@ Respond ONLY with a JSON object matching this schema:
       // Using runtime.agentId as an example:
       roomId: internalRoomId,
       entityId: runtime.agentId, // This also uses agentId
-      worldId: runtime.agentId, // Using agentId as worldId (consistent with room creation)
       content: { text: `Processed email subject: ${emailDetails.subject}` },
       metadata: {
         type: "pingpal_email_processed",

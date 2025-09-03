@@ -78,7 +78,6 @@ const pingPalEmailPlugin: Plugin = {
         name: `PingPal Internal Logs - Agent ${runtime.agentId.slice(0, 8)}`,
         source: "internal_pingpal_plugin", // Identifies this plugin as the source
         type: ChannelType.SELF, // SELF type is suitable for agent-specific internal logs
-        worldId: runtime.agentId, // Using agentId as worldId for agent-specific internal logs
       });
       logger.info(
         `[PingPal Email Plugin] Ensured internal logging room exists: ${internalRoomId}`
