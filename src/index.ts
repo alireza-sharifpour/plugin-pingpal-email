@@ -78,8 +78,7 @@ const pingPalEmailPlugin: Plugin = {
         name: `PingPal Internal Logs - Agent ${runtime.agentId.slice(0, 8)}`,
         source: "internal_pingpal_plugin", // Identifies this plugin as the source
         type: ChannelType.SELF, // SELF type is suitable for agent-specific internal logs
-        // worldId: Optional - if this agent operates within a specific world context.
-        // For your standalone agent as per PRD, omitting worldId for this internal room is fine.
+        worldId: runtime.agentId, // Using agentId as worldId for agent-specific internal logs
       });
       logger.info(
         `[PingPal Email Plugin] Ensured internal logging room exists: ${internalRoomId}`
@@ -136,18 +135,24 @@ const pingPalEmailPlugin: Plugin = {
       return;
     }
 
-    const imapClient = new ImapFlow({
-      host,
-      port,
-      secure,
-      auth: { user, pass },
-      logger: false, // Set to true or custom logger for detailed IMAP logs
-    });
+    const createImapClient = () => {
+      const client = new ImapFlow({
+        host,
+        port,
+        secure,
+        auth: { user, pass },
+        logger: false, // Set to true or custom logger for detailed IMAP logs
+      });
 
-    imapClient.on("error", (err: Error) => {
-      logger.error("[PingPal Email] IMAP Flow Error:", err);
-      // Consider implementing reconnection logic here or in monitorEmails
-    });
+      client.on("error", (err: Error) => {
+        logger.error("[PingPal Email] IMAP Flow Error:", err);
+        // Consider implementing reconnection logic here or in monitorEmails
+      });
+
+      return client;
+    };
+
+    let imapClient = createImapClient();
 
     const streamToString = async (
       stream: NodeJS.ReadableStream
@@ -419,6 +424,8 @@ const pingPalEmailPlugin: Plugin = {
             logger.info(
               "[PingPal Email] Connection lost during IDLE. Attempting to reconnect in 30 seconds..."
             );
+            // Create a new IMAP client instance for reconnection
+            imapClient = createImapClient();
             setTimeout(monitorEmails, 30000);
           } else {
             logger.info(
@@ -434,6 +441,8 @@ const pingPalEmailPlugin: Plugin = {
                   "[PingPal Email] Failed to restart IDLE:",
                   reIdleErr
                 );
+                // Create a new IMAP client instance for reconnection
+                imapClient = createImapClient();
                 setTimeout(monitorEmails, 30000);
               }
             }, 10000);
@@ -455,6 +464,8 @@ const pingPalEmailPlugin: Plugin = {
         } else {
           imapClient.close();
         }
+        // Create a new IMAP client instance for reconnection
+        imapClient = createImapClient();
         setTimeout(monitorEmails, 60000);
       }
     };
