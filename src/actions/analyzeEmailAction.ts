@@ -1,6 +1,7 @@
 import type { Action, IAgentRuntime, Memory, UUID } from "@elizaos/core";
 import { logger, ModelType, stringToUuid } from "@elizaos/core";
 import type { EmailDetails } from "../types";
+import { ensureInternalRoomExists } from "../index";
 
 // Define a custom metadata interface that extends the base Memory metadata
 interface PingpalEmailMetadata {
@@ -16,11 +17,6 @@ interface PingpalEmailMetadata {
   };
   [key: string]: unknown; // Added to satisfy CustomMetadata requirements
 }
-
-const getInternalRoomIdForAgent = (agentId: UUID): UUID => {
-  const agentSpecificRoomSuffix = agentId.slice(0, 13);
-  return stringToUuid(`pingpal-email-internal-room-${agentSpecificRoomSuffix}`);
-};
 
 export const analyzeEmailAction: Action = {
   name: "ANALYZE_EMAIL",
@@ -38,7 +34,7 @@ export const analyzeEmailAction: Action = {
       !emailDetails.bodyText
     ) {
       logger.warn(
-        "[ANALYZE_EMAIL] Validation failed: Incomplete email details received."
+        "[ANALYZE_EMAIL] Validation failed: Incomplete email details received.",
       );
       return false;
     }
@@ -48,7 +44,7 @@ export const analyzeEmailAction: Action = {
     runtime: IAgentRuntime,
     emailDetailsInput: any, // This will be the EmailDetails object
     state?: any,
-    options?: any
+    options?: any,
   ) => {
     // Cast input to expected type
     const emailDetails = emailDetailsInput as EmailDetails;
@@ -56,39 +52,45 @@ export const analyzeEmailAction: Action = {
     // Validate essential data is present
     if (!emailDetails || !emailDetails.messageId) {
       logger.error(
-        "[ANALYZE_EMAIL] Invalid or incomplete email details received"
+        "[ANALYZE_EMAIL] Invalid or incomplete email details received",
       );
       return false;
     }
 
     logger.info(
-      `[ANALYZE_EMAIL] Action started for email ID: ${emailDetails.messageId}`
+      `[ANALYZE_EMAIL] Action started for email ID: ${emailDetails.messageId}`,
     );
+
+    const internalRoomId: UUID = await ensureInternalRoomExists(runtime);
 
     // Retrieve existing processed email memories to check for duplicates
     const processedMemories = await runtime.getMemories({
+      roomId: internalRoomId,
+      count: 100,
+      unique: true,
       tableName: "pingpal_email_processed",
-      agentId: runtime.agentId,
     });
 
     // Check if this email has already been processed by looking for its messageId
-    const isDuplicate = processedMemories.some(
-      (memory) =>
-        (memory.metadata as unknown as PingpalEmailMetadata)
-          ?.originalEmailMessageId === emailDetails.messageId
-    );
+    const isDuplicate = processedMemories
+      .filter((memory) => memory.metadata?.type === "pingpal_email_processed")
+      .some(
+        (memory) =>
+          (memory.metadata as unknown as PingpalEmailMetadata)
+            ?.originalEmailMessageId === emailDetails.messageId,
+      );
 
     // If duplicate, log and exit early
     if (isDuplicate) {
       logger.info(
-        `[ANALYZE_EMAIL] Skipping duplicate email with ID: ${emailDetails.messageId}`
+        `[ANALYZE_EMAIL] Skipping duplicate email with ID: ${emailDetails.messageId}`,
       );
       return true; // Action completed successfully (by skipping duplicate)
     }
 
     // Email is not a duplicate - continue with processing in subsequent tasks
     logger.info(
-      `[ANALYZE_EMAIL] New email detected, proceeding with analysis: ${emailDetails.subject}`
+      `[ANALYZE_EMAIL] New email detected, proceeding with analysis: ${emailDetails.subject}`,
     );
 
     // --- LLM Interaction ---
@@ -131,7 +133,7 @@ Respond ONLY with a JSON object matching this schema:
 
       if (!parsedResponse) {
         logger.warn(
-          `[ANALYZE_EMAIL] LLM returned empty response for email ID: ${emailDetails.messageId}`
+          `[ANALYZE_EMAIL] LLM returned empty response for email ID: ${emailDetails.messageId}`,
         );
         llmErrorOccurred = true;
         // analysisResult remains undefined, will use a fallback for logging
@@ -147,7 +149,7 @@ Respond ONLY with a JSON object matching this schema:
         ) {
           logger.error(
             `[ANALYZE_EMAIL] LLM response validation failed for email ID ${emailDetails.messageId}: Invalid structure or types after schema validation. Received:`,
-            parsedResponse
+            parsedResponse,
           );
           llmErrorOccurred = true;
           // analysisResult remains undefined, will use a fallback for logging
@@ -166,14 +168,12 @@ Respond ONLY with a JSON object matching this schema:
     } catch (error) {
       logger.error(
         `[ANALYZE_EMAIL] LLM interaction or JSON parsing failed for email ID ${emailDetails.messageId}:`,
-        error
+        error,
       );
       llmErrorOccurred = true;
       // analysisResult remains undefined, will use a fallback for logging
     }
     // --- End of LLM Interaction ---
-
-    const internalRoomId: UUID = getInternalRoomIdForAgent(runtime.agentId);
 
     // Processed Email Logging
     const analysisDataForLogging: PingpalEmailMetadata["analysisResult"] =
@@ -186,14 +186,11 @@ Respond ONLY with a JSON object matching this schema:
             error: "LLM_PROCESSING_FAILED",
           };
 
-    const memoryToCreate = {
-      agentId: runtime.agentId,
-      // Consider if runtime.agentId is the correct UUID to use here,
-      // or if another relevant UUID should be used.
-      // Using runtime.agentId as an example:
+    const memoryToCreate: Memory = {
+      entityId: runtime.agentId,
       roomId: internalRoomId,
-      entityId: runtime.agentId, // This also uses agentId
       content: { text: `Processed email subject: ${emailDetails.subject}` },
+      unique: true,
       metadata: {
         type: "pingpal_email_processed",
         originalEmailMessageId: emailDetails.messageId,
@@ -204,14 +201,18 @@ Respond ONLY with a JSON object matching this schema:
     };
 
     try {
-      await runtime.createMemory(memoryToCreate, "pingpal_email_processed");
+      await runtime.createMemory(
+        memoryToCreate,
+        "pingpal_email_processed",
+        true,
+      );
       logger.info(
-        `[ANALYZE_EMAIL] Successfully logged processed email ID: ${emailDetails.messageId}`
+        `[ANALYZE_EMAIL] Successfully logged processed email ID: ${emailDetails.messageId}`,
       );
     } catch (error) {
       logger.error(
         `[ANALYZE_EMAIL] Failed to log processed email ID ${emailDetails.messageId}:`,
-        error
+        error,
       );
       // Depending on policy, an error here might also warrant returning false from the action.
       // For now, we'll continue, but this could be a point of failure.
@@ -221,10 +222,10 @@ Respond ONLY with a JSON object matching this schema:
     // --- Triggering SEND_EMAIL_TELEGRAM_NOTIFICATION ---
     if (!llmErrorOccurred && analysisResult && analysisResult.important) {
       logger.info(
-        `[ANALYZE_EMAIL] Email ID: ${emailDetails.messageId} marked as important. Attempting to trigger notification.`
+        `[ANALYZE_EMAIL] Email ID: ${emailDetails.messageId} marked as important. Attempting to trigger notification.`,
       );
       const sendNotificationAction = runtime.actions.find(
-        (a) => a.name === "SEND_EMAIL_TELEGRAM_NOTIFICATION"
+        (a) => a.name === "SEND_EMAIL_TELEGRAM_NOTIFICATION",
       );
 
       if (sendNotificationAction && sendNotificationAction.handler) {
@@ -236,22 +237,22 @@ Respond ONLY with a JSON object matching this schema:
             runtime,
             emailDetails as any, // Cast to any to satisfy linter for this specific action call
             undefined,
-            { analysisResult }
+            { analysisResult },
           );
           logger.info(
-            `[ANALYZE_EMAIL] Call to SEND_EMAIL_TELEGRAM_NOTIFICATION handler completed for email ID: ${emailDetails.messageId}.`
+            `[ANALYZE_EMAIL] Call to SEND_EMAIL_TELEGRAM_NOTIFICATION handler completed for email ID: ${emailDetails.messageId}.`,
           );
         } catch (error) {
           logger.error(
             `[ANALYZE_EMAIL] Error calling SEND_EMAIL_TELEGRAM_NOTIFICATION handler for email ID ${emailDetails.messageId}:`,
-            error
+            error,
           );
           // The ANALYZE_EMAIL action itself does not fail if the triggered action errors out.
           // That error should be logged by the sendNotificationAction itself.
         }
       } else {
         logger.error(
-          `[ANALYZE_EMAIL] Action SEND_EMAIL_TELEGRAM_NOTIFICATION not found or handler is missing for email ID: ${emailDetails.messageId}.`
+          `[ANALYZE_EMAIL] Action SEND_EMAIL_TELEGRAM_NOTIFICATION not found or handler is missing for email ID: ${emailDetails.messageId}.`,
         );
       }
     } else if (
@@ -260,12 +261,12 @@ Respond ONLY with a JSON object matching this schema:
       !analysisResult.important
     ) {
       logger.info(
-        `[ANALYZE_EMAIL] Email ID: ${emailDetails.messageId} not marked as important. No notification will be sent.`
+        `[ANALYZE_EMAIL] Email ID: ${emailDetails.messageId} not marked as important. No notification will be sent.`,
       );
     } else if (llmErrorOccurred) {
       // This condition implies analysisResult might be undefined or not reliably populated.
       logger.warn(
-        `[ANALYZE_EMAIL] Skipping notification trigger for email ID: ${emailDetails.messageId} due to previous LLM error or undefined analysis result.`
+        `[ANALYZE_EMAIL] Skipping notification trigger for email ID: ${emailDetails.messageId} due to previous LLM error or undefined analysis result.`,
       );
     }
     // --- End of Triggering SEND_EMAIL_TELEGRAM_NOTIFICATION ---

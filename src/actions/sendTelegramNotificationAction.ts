@@ -28,7 +28,7 @@ export const sendTelegramNotificationAction: Action = {
     runtime: IAgentRuntime,
     originalEmailDetailsInput: any, // This will be the EmailDetails object
     state?: any,
-    options?: { analysisResult: AnalysisResult }
+    options?: { analysisResult: AnalysisResult },
   ) => {
     logger.info(`[SEND_EMAIL_TELEGRAM_NOTIFICATION] Action started.`);
 
@@ -36,7 +36,7 @@ export const sendTelegramNotificationAction: Action = {
 
     if (!originalEmailDetails || !originalEmailDetails.messageId) {
       logger.error(
-        "[SEND_EMAIL_TELEGRAM_NOTIFICATION] Invalid or incomplete originalEmailDetails received."
+        "[SEND_EMAIL_TELEGRAM_NOTIFICATION] Invalid or incomplete originalEmailDetails received.",
       );
       return false;
     }
@@ -50,13 +50,13 @@ export const sendTelegramNotificationAction: Action = {
 
     if (!targetTelegramUserId) {
       logger.error(
-        "[SEND_EMAIL_TELEGRAM_NOTIFICATION] targetTelegramUserId setting is missing."
+        "[SEND_EMAIL_TELEGRAM_NOTIFICATION] targetTelegramUserId setting is missing.",
       );
       return false;
     }
     if (!userEmailAddress) {
       logger.error(
-        "[SEND_EMAIL_TELEGRAM_NOTIFICATION] userEmailAddress setting is missing."
+        "[SEND_EMAIL_TELEGRAM_NOTIFICATION] userEmailAddress setting is missing.",
       );
       return false;
     }
@@ -68,7 +68,7 @@ export const sendTelegramNotificationAction: Action = {
     ) {
       logger.error(
         "[SEND_EMAIL_TELEGRAM_NOTIFICATION] Invalid or missing analysisResult in options, or summary is not a string. Options received:",
-        options
+        options,
       );
       return false;
     }
@@ -92,23 +92,25 @@ export const sendTelegramNotificationAction: Action = {
         await (telegramService as any).bot.telegram.sendMessage(
           targetTelegramUserId || process.env.PINGPAL_TARGET_TELEGRAM_USERID,
           notificationText,
-          { parse_mode: "MarkdownV2" }
+          { parse_mode: "MarkdownV2" },
         );
         logger.info(
-          `[SEND_EMAIL_TELEGRAM_NOTIFICATION] Successfully sent notification to Telegram user ID: ${targetTelegramUserId} for email ID: ${originalEmailDetails.messageId}`
+          `[SEND_EMAIL_TELEGRAM_NOTIFICATION] Successfully sent notification to Telegram user ID: ${targetTelegramUserId} for email ID: ${originalEmailDetails.messageId}`,
         );
         return true;
       } else {
         logger.error(
           "[SEND_EMAIL_TELEGRAM_NOTIFICATION] Telegram service is not available or sendMessage method is missing/structured unexpectedly. Service object keys: " +
-            (telegramService ? Object.keys(telegramService).join(", ") : "null")
+            (telegramService
+              ? Object.keys(telegramService).join(", ")
+              : "null"),
         );
         return false;
       }
     } catch (error) {
       logger.error(
         `[SEND_EMAIL_TELEGRAM_NOTIFICATION] Failed to send Telegram notification for email ID ${originalEmailDetails.messageId}:`,
-        error
+        error,
       );
       return false;
     }

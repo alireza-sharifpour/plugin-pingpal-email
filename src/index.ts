@@ -34,7 +34,7 @@ const configSchema = z.object({
     .transform((val) => {
       if (!val) {
         logger.warn(
-          "Example plugin variable is not provided (this is expected)"
+          "Example plugin variable is not provided (this is expected)",
         );
       }
       return val;
@@ -61,6 +61,33 @@ const getInternalRoomIdForAgent = (agentId: UUID): UUID => {
   return stringToUuid(`pingpal-email-internal-room-${agentSpecificRoomSuffix}`);
 };
 
+// Helper function to ensure internal room exists (lazy initialization)
+const ensureInternalRoomExists = async (
+  runtime: IAgentRuntime,
+): Promise<UUID> => {
+  const internalRoomId = getInternalRoomIdForAgent(runtime.agentId);
+
+  try {
+    await runtime.ensureRoomExists({
+      id: internalRoomId,
+      name: `PingPal Internal Logs - Agent ${runtime.agentId.slice(0, 8)}`,
+      source: "internal_pingpal_plugin",
+      type: ChannelType.SELF,
+    });
+    logger.info(
+      `[PingPal Email Plugin] Ensured internal logging room exists: ${internalRoomId}`,
+    );
+  } catch (error) {
+    logger.error(
+      "[PingPal Email Plugin] Failed to create/ensure internal logging room:",
+      error,
+    );
+    // Don't throw - return the room ID anyway and let memory creation handle the failure
+  }
+
+  return internalRoomId;
+};
+
 const pingPalEmailPlugin: Plugin = {
   name: "plugin-pingpal-email",
   description:
@@ -70,26 +97,6 @@ const pingPalEmailPlugin: Plugin = {
   evaluators: [],
   async init(config: Record<string, string>, runtime: IAgentRuntime) {
     logger.info("Initializing PingPal Email Plugin (with imapflow)...");
-
-    const internalRoomId = getInternalRoomIdForAgent(runtime.agentId);
-    try {
-      await runtime.ensureRoomExists({
-        id: internalRoomId,
-        name: `PingPal Internal Logs - Agent ${runtime.agentId.slice(0, 8)}`,
-        source: "internal_pingpal_plugin", // Identifies this plugin as the source
-        type: ChannelType.SELF, // SELF type is suitable for agent-specific internal logs
-      });
-      logger.info(
-        `[PingPal Email Plugin] Ensured internal logging room exists: ${internalRoomId}`
-      );
-    } catch (error) {
-      logger.error(
-        "[PingPal Email Plugin] CRITICAL: Failed to create/ensure internal logging room. Memory logging will fail.",
-        error
-      );
-      // Depending on how critical this is, you might throw the error to stop plugin load
-      // throw new Error(`Failed to initialize PingPal internal room: ${error.message}`);
-    }
 
     const targetTelegramUserId =
       runtime.getSetting("pingpal.targetTelegramUserId") ||
@@ -104,7 +111,7 @@ const pingPalEmailPlugin: Plugin = {
       runtime.getSetting("EMAIL_INCOMING_PORT") ||
         process.env.EMAIL_INCOMING_PORT ||
         "993",
-      10
+      10,
     );
     const user =
       runtime.getSetting("EMAIL_INCOMING_USER") ||
@@ -124,12 +131,12 @@ const pingPalEmailPlugin: Plugin = {
       runtime.getSetting("pingpal.lookbackHours") ||
         process.env.PINGPAL_EMAIL_LOOKBACK_HOURS ||
         "24", // Default to 24 hours
-      10
+      10,
     );
 
     if (!host || !user || !pass) {
       logger.error(
-        "[PingPal Email] Missing required IMAP settings. Please check EMAIL_INCOMING_HOST, EMAIL_INCOMING_USER, EMAIL_INCOMING_PASS."
+        "[PingPal Email] Missing required IMAP settings. Please check EMAIL_INCOMING_HOST, EMAIL_INCOMING_USER, EMAIL_INCOMING_PASS.",
       );
       return;
     }
@@ -154,7 +161,7 @@ const pingPalEmailPlugin: Plugin = {
     let imapClient = createImapClient();
 
     const streamToString = async (
-      stream: NodeJS.ReadableStream
+      stream: NodeJS.ReadableStream,
     ): Promise<string> => {
       const chunks: Buffer[] = [];
       return new Promise((resolve, reject) => {
@@ -178,7 +185,7 @@ const pingPalEmailPlugin: Plugin = {
       try {
         if (!imapClient.usable) {
           logger.info(
-            "[PingPal Email] Attempting to connect to IMAP server..."
+            "[PingPal Email] Attempting to connect to IMAP server...",
           );
           await imapClient.connect();
           logger.info("[PingPal Email] Connected to IMAP server.");
@@ -198,7 +205,7 @@ const pingPalEmailPlugin: Plugin = {
             const previousCount = data.prevCount === null ? 0 : data.prevCount;
             if (data.count > previousCount) {
               logger.info(
-                `[PingPal Email] New email(s) detected. Current count: ${data.count}, Previous count: ${previousCount}`
+                `[PingPal Email] New email(s) detected. Current count: ${data.count}, Previous count: ${previousCount}`,
               );
               const lock = await imapClient.getMailboxLock(mailbox);
               try {
@@ -208,21 +215,21 @@ const pingPalEmailPlugin: Plugin = {
                 // Format date for logging, ImapFlow should handle Date object directly
                 const formattedSinceDate = sinceDate.toISOString();
                 logger.info(
-                  `[PingPal Email] Searching for unseen messages since ${formattedSinceDate} (approx. last ${emailLookbackHours} hours).`
+                  `[PingPal Email] Searching for unseen messages since ${formattedSinceDate} (approx. last ${emailLookbackHours} hours).`,
                 );
 
                 const uidsToFetch = await imapClient.search(
                   { unseen: true, since: sinceDate },
-                  { uid: true }
+                  { uid: true },
                 );
 
                 logger.info(
-                  `[PingPal Email] Found ${uidsToFetch.length} unseen message(s).`
+                  `[PingPal Email] Found ${uidsToFetch.length} unseen message(s).`,
                 );
 
                 for (const uid of uidsToFetch) {
                   logger.info(
-                    `[PingPal Email] Fetching message UID: ${uid}...`
+                    `[PingPal Email] Fetching message UID: ${uid}...`,
                   );
                   const msgData = await imapClient.fetchOne(uid.toString(), {
                     envelope: true,
@@ -232,57 +239,57 @@ const pingPalEmailPlugin: Plugin = {
 
                   let bodyText = "";
                   let textPartInfo = msgData.bodyStructure?.childNodes?.find(
-                    (part) => part.type === "text/plain"
+                    (part) => part.type === "text/plain",
                   );
 
                   if (textPartInfo?.part) {
                     const downloadedPart = await imapClient.download(
                       uid.toString(),
                       textPartInfo.part,
-                      { uid: true }
+                      { uid: true },
                     );
                     if (downloadedPart?.content) {
                       bodyText = await streamToString(downloadedPart.content);
                     }
                   } else {
                     let htmlPartInfo = msgData.bodyStructure?.childNodes?.find(
-                      (part) => part.type === "text/html"
+                      (part) => part.type === "text/html",
                     );
                     if (htmlPartInfo?.part) {
                       const downloadedHtmlPart = await imapClient.download(
                         uid.toString(),
                         htmlPartInfo.part,
-                        { uid: true }
+                        { uid: true },
                       );
                       if (downloadedHtmlPart?.content) {
                         const htmlContent = await streamToString(
-                          downloadedHtmlPart.content
+                          downloadedHtmlPart.content,
                         );
                         bodyText = htmlToText(htmlContent);
                       }
                     } else {
                       const firstTextPart =
                         msgData.bodyStructure?.childNodes?.find((part) =>
-                          part.type?.startsWith("text/")
+                          part.type?.startsWith("text/"),
                         );
                       if (firstTextPart?.part) {
                         logger.warn(
-                          `[PingPal Email] No explicit text/plain or text/html part for UID ${uid}. Attempting first available text part: ${firstTextPart.type}`
+                          `[PingPal Email] No explicit text/plain or text/html part for UID ${uid}. Attempting first available text part: ${firstTextPart.type}`,
                         );
                         const downloadedFallbackPart =
                           await imapClient.download(
                             uid.toString(),
                             firstTextPart.part,
-                            { uid: true }
+                            { uid: true },
                           );
                         if (downloadedFallbackPart?.content) {
                           bodyText = await streamToString(
-                            downloadedFallbackPart.content
+                            downloadedFallbackPart.content,
                           );
                         }
                       } else {
                         logger.warn(
-                          `[PingPal Email] No text/plain or text/html part found for UID ${uid}. Body will be empty.`
+                          `[PingPal Email] No text/plain or text/html part found for UID ${uid}. Body will be empty.`,
                         );
                       }
                     }
@@ -299,11 +306,11 @@ const pingPalEmailPlugin: Plugin = {
                   ) {
                     finalMessageId = messageIdFromEnvelope.trim();
                     logger.info(
-                      `[PingPal Email] Extracted Message-ID from envelope: "${finalMessageId}" for UID ${uid}.`
+                      `[PingPal Email] Extracted Message-ID from envelope: "${finalMessageId}" for UID ${uid}.`,
                     );
                   } else {
                     logger.warn(
-                      `[PingPal Email] Message-ID not found or empty in envelope for UID ${uid} (envelope.messageId was: "${messageIdFromEnvelope}"). Attempting to parse from raw headers.`
+                      `[PingPal Email] Message-ID not found or empty in envelope for UID ${uid} (envelope.messageId was: "${messageIdFromEnvelope}"). Attempting to parse from raw headers.`,
                     );
 
                     let messageIdFromRawHeaders: string | undefined;
@@ -316,7 +323,7 @@ const pingPalEmailPlugin: Plugin = {
                             "... (truncated)"
                           : rawHeadersString;
                       logger.info(
-                        `[PingPal Email] Raw headers for UID ${uid} (Buffer length: ${msgData.headers.length}):\\n${loggableHeaders}`
+                        `[PingPal Email] Raw headers for UID ${uid} (Buffer length: ${msgData.headers.length}):\\n${loggableHeaders}`,
                       );
 
                       // Regex to find Message-ID in raw headers (case-insensitive)
@@ -325,18 +332,18 @@ const pingPalEmailPlugin: Plugin = {
                       if (match && match[1]) {
                         messageIdFromRawHeaders = match[1].trim();
                         logger.info(
-                          `[PingPal Email] Extracted Message-ID from raw headers: "${messageIdFromRawHeaders}" for UID ${uid}.`
+                          `[PingPal Email] Extracted Message-ID from raw headers: "${messageIdFromRawHeaders}" for UID ${uid}.`,
                         );
                       } else {
                         logger.warn(
-                          `[PingPal Email] Could not parse Message-ID from raw headers for UID ${uid}.`
+                          `[PingPal Email] Could not parse Message-ID from raw headers for UID ${uid}.`,
                         );
                       }
                     } else if (msgData.headers) {
                       // Log if headers is present but not a Buffer, truncated to avoid large logs
                       const headersPreview = JSON.stringify(msgData.headers);
                       logger.warn(
-                        `[PingPal Email] msgData.headers is present but not a Buffer for UID ${uid}. Type: ${typeof msgData.headers}. Value (preview): ${headersPreview.substring(0, 200)}${headersPreview.length > 200 ? "..." : ""}`
+                        `[PingPal Email] msgData.headers is present but not a Buffer for UID ${uid}. Type: ${typeof msgData.headers}. Value (preview): ${headersPreview.substring(0, 200)}${headersPreview.length > 200 ? "..." : ""}`,
                       );
                     }
 
@@ -349,7 +356,7 @@ const pingPalEmailPlugin: Plugin = {
                     } else {
                       const fallbackId = `pingpal-no-id-${uid}-${msgData.envelope?.date?.toISOString() || Date.now()}`;
                       logger.warn(
-                        `[PingPal Email] Could not extract valid Message-ID from envelope or raw headers for UID ${uid}. Generating fallback ID: "${fallbackId}".`
+                        `[PingPal Email] Could not extract valid Message-ID from envelope or raw headers for UID ${uid}. Generating fallback ID: "${fallbackId}".`,
                       );
                       finalMessageId = fallbackId;
                     }
@@ -366,17 +373,17 @@ const pingPalEmailPlugin: Plugin = {
                       msgData.envelope?.to?.map((addr) =>
                         addr.mailbox && addr.host
                           ? `${addr.mailbox}@${addr.host}`
-                          : addr.name || "Unknown Recipient"
+                          : addr.name || "Unknown Recipient",
                       ) || [],
                     subject: msgData.envelope?.subject || "No Subject",
                     bodyText: bodyText,
                   };
 
                   logger.info(
-                    `[PingPal Email] Processing email: Subject - "${emailDetails.subject}", From - "${emailDetails.from}", Message-ID - "${emailDetails.messageId}"`
+                    `[PingPal Email] Processing email: Subject - "${emailDetails.subject}", From - "${emailDetails.from}", Message-ID - "${emailDetails.messageId}"`,
                   );
                   const analyzeAction = runtime.actions.find(
-                    (a) => a.name === "ANALYZE_EMAIL"
+                    (a) => a.name === "ANALYZE_EMAIL",
                   );
                   if (analyzeAction?.handler) {
                     try {
@@ -384,30 +391,30 @@ const pingPalEmailPlugin: Plugin = {
                         runtime,
                         emailDetails as any,
                         undefined,
-                        undefined
+                        undefined,
                       );
                     } catch (actionError) {
                       logger.error(
                         `[PingPal Email] Error executing ANALYZE_EMAIL action for UID ${uid}:`,
-                        actionError
+                        actionError,
                       );
                     }
                   } else {
                     logger.error(
-                      "[PingPal Email] ANALYZE_EMAIL action not found."
+                      "[PingPal Email] ANALYZE_EMAIL action not found.",
                     );
                   }
                 }
               } catch (fetchErr) {
                 logger.error(
                   "[PingPal Email] Error fetching or processing messages:",
-                  fetchErr
+                  fetchErr,
                 );
               } finally {
                 lock.release();
               }
             }
-          }
+          },
         );
 
         logger.info("[PingPal Email] Starting IDLE mode...");
@@ -417,18 +424,18 @@ const pingPalEmailPlugin: Plugin = {
         } catch (idleErr) {
           logger.error(
             "[PingPal Email] IDLE mode error or connection lost:",
-            idleErr
+            idleErr,
           );
           if (imapClient.usable === false) {
             logger.info(
-              "[PingPal Email] Connection lost during IDLE. Attempting to reconnect in 30 seconds..."
+              "[PingPal Email] Connection lost during IDLE. Attempting to reconnect in 30 seconds...",
             );
             // Create a new IMAP client instance for reconnection
             imapClient = createImapClient();
             setTimeout(monitorEmails, 30000);
           } else {
             logger.info(
-              "[PingPal Email] IDLE ended, but client still usable. Will attempt to restart IDLE in 10 seconds."
+              "[PingPal Email] IDLE ended, but client still usable. Will attempt to restart IDLE in 10 seconds.",
             );
             setTimeout(async () => {
               try {
@@ -438,7 +445,7 @@ const pingPalEmailPlugin: Plugin = {
               } catch (reIdleErr) {
                 logger.error(
                   "[PingPal Email] Failed to restart IDLE:",
-                  reIdleErr
+                  reIdleErr,
                 );
                 // Create a new IMAP client instance for reconnection
                 imapClient = createImapClient();
@@ -456,7 +463,7 @@ const pingPalEmailPlugin: Plugin = {
           } catch (logoutErr) {
             logger.error(
               "[PingPal Email] Error during logout after main error:",
-              logoutErr
+              logoutErr,
             );
             imapClient.close();
           }
@@ -473,7 +480,7 @@ const pingPalEmailPlugin: Plugin = {
 
     const gracefulShutdown = async () => {
       logger.info(
-        "[PingPal Email] Attempting graceful shutdown of IMAP client..."
+        "[PingPal Email] Attempting graceful shutdown of IMAP client...",
       );
       if (imapClient && imapClient.usable) {
         try {
@@ -486,7 +493,7 @@ const pingPalEmailPlugin: Plugin = {
       } else if (imapClient) {
         imapClient.close();
         logger.info(
-          "[PingPal Email] IMAP client closed (was not in a usable state)."
+          "[PingPal Email] IMAP client closed (was not in a usable state).",
         );
       }
     };
@@ -495,9 +502,12 @@ const pingPalEmailPlugin: Plugin = {
     process.on("SIGTERM", gracefulShutdown);
 
     logger.info(
-      "PingPal Email Plugin (with imapflow) initialized and monitoring started."
+      "PingPal Email Plugin (with imapflow) initialized and monitoring started.",
     );
   },
 };
+
+// Export helper functions for use by actions
+export { ensureInternalRoomExists, getInternalRoomIdForAgent };
 
 export default pingPalEmailPlugin;
